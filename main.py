@@ -20,6 +20,11 @@ import asyncio
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 # Add llm-latency-lab to path for package imports
 sys.path.insert(0, str(Path(__file__).parent / "llm-latency-lab"))
 
