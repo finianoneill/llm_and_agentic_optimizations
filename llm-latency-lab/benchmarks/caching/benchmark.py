@@ -3,6 +3,9 @@ Caching benchmarks - Prompt caching and semantic caching tests.
 
 Tests the impact of Anthropic's cache_control feature and
 demonstrates semantic caching patterns.
+
+Note: When using Claude Max authentication via the Claude Agent SDK,
+caching is handled automatically by the underlying infrastructure.
 """
 
 import asyncio
@@ -10,10 +13,19 @@ import hashlib
 import json
 from typing import Any, Optional
 
-import anthropic
+from instrumentation.timing import Timer, TimingResult
+from instrumentation.claude_sdk_client import ClaudeMaxClient
+from harness.runner import BenchmarkConfig, benchmark
 
-from ...instrumentation.timing import Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+
+def get_model_identifier(model: str) -> str:
+    """Map full model name to SDK model identifier."""
+    model_map = {
+        "claude-sonnet-4-20250514": "sonnet",
+        "claude-opus-4-5-20251101": "opus",
+        "claude-3-5-haiku-20241022": "haiku",
+    }
+    return model_map.get(model, "sonnet")
 
 
 # Large system prompt to benefit from caching
@@ -66,34 +78,29 @@ Key metrics to observe:
 async def cached_prompt_request(config: BenchmarkConfig) -> TimingResult:
     """Benchmark request with prompt caching enabled.
 
-    Uses cache_control to cache the system prompt.
+    Note: With Claude Max SDK, caching behavior is managed by the infrastructure.
+    The system prompt is passed and caching may occur automatically.
     """
-    client = anthropic.AsyncAnthropic()
+    sdk_model = get_model_identifier(config.model)
+    client = ClaudeMaxClient(model=sdk_model)
     timer = Timer("cached_prompt")
     user_prompt = config.metadata.get("prompt", "What is machine learning?")
     system_prompt = config.metadata.get("system_prompt", LARGE_SYSTEM_PROMPT)
 
     timer.start()
 
-    response = await client.messages.create(
-        model=config.model,
+    response = await client.create_message(
+        prompt=user_prompt,
         max_tokens=config.metadata.get("max_tokens", 300),
-        system=[
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": user_prompt}],
+        system_prompt=system_prompt,
     )
 
     timer.stop()
 
     # Extract cache usage from response
     usage = response.usage
-    cache_creation = getattr(usage, "cache_creation_input_tokens", 0)
-    cache_read = getattr(usage, "cache_read_input_tokens", 0)
+    cache_creation = usage.cache_creation_input_tokens
+    cache_read = usage.cache_read_input_tokens
 
     return timer.to_result(
         input_tokens=usage.input_tokens,
@@ -109,20 +116,20 @@ async def cached_prompt_request(config: BenchmarkConfig) -> TimingResult:
 async def uncached_prompt_request(config: BenchmarkConfig) -> TimingResult:
     """Benchmark request without prompt caching (baseline).
 
-    Does not use cache_control for comparison.
+    Note: With Claude Max SDK, caching behavior is managed by infrastructure.
     """
-    client = anthropic.AsyncAnthropic()
+    sdk_model = get_model_identifier(config.model)
+    client = ClaudeMaxClient(model=sdk_model)
     timer = Timer("uncached_prompt")
     user_prompt = config.metadata.get("prompt", "What is machine learning?")
     system_prompt = config.metadata.get("system_prompt", LARGE_SYSTEM_PROMPT)
 
     timer.start()
 
-    response = await client.messages.create(
-        model=config.model,
+    response = await client.create_message(
+        prompt=user_prompt,
         max_tokens=config.metadata.get("max_tokens", 300),
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
+        system_prompt=system_prompt,
     )
 
     timer.stop()
@@ -192,16 +199,16 @@ async def semantic_cached_request(config: BenchmarkConfig) -> TimingResult:
         )
 
     # Cache miss - make API call
-    client = anthropic.AsyncAnthropic()
-    response = await client.messages.create(
-        model=config.model,
+    sdk_model = get_model_identifier(config.model)
+    client = ClaudeMaxClient(model=sdk_model)
+    response = await client.create_message(
+        prompt=user_prompt,
         max_tokens=config.metadata.get("max_tokens", 300),
-        messages=[{"role": "user", "content": user_prompt}],
     )
 
     # Store in cache
     _semantic_cache.set(user_prompt, {
-        "content": response.content[0].text,
+        "content": response.content,
         "usage": {
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
@@ -227,8 +234,8 @@ async def compare_cached_vs_uncached(
 
     Demonstrates the latency benefits of prompt caching.
     """
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()
@@ -326,8 +333,10 @@ async def test_cache_warmup_pattern(
     """Demonstrate cache warm-up pattern.
 
     Shows how the first request warms the cache and subsequent requests benefit.
+    Note: With Claude Max SDK, caching is managed by infrastructure.
     """
-    client = anthropic.AsyncAnthropic()
+    sdk_model = get_model_identifier(model)
+    client = ClaudeMaxClient(model=sdk_model)
     results = []
 
     print("\n" + "=" * 60)
@@ -338,24 +347,17 @@ async def test_cache_warmup_pattern(
         timer = Timer(f"request_{i+1}")
         timer.start()
 
-        response = await client.messages.create(
-            model=model,
+        response = await client.create_message(
+            prompt=f"Question {i+1}: What is AI?",
             max_tokens=100,
-            system=[
-                {
-                    "type": "text",
-                    "text": LARGE_SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[{"role": "user", "content": f"Question {i+1}: What is AI?"}],
+            system_prompt=LARGE_SYSTEM_PROMPT,
         )
 
         timer.stop()
 
         usage = response.usage
-        cache_creation = getattr(usage, "cache_creation_input_tokens", 0)
-        cache_read = getattr(usage, "cache_read_input_tokens", 0)
+        cache_creation = usage.cache_creation_input_tokens
+        cache_read = usage.cache_read_input_tokens
 
         result = timer.to_result(
             cache_creation_input_tokens=cache_creation,

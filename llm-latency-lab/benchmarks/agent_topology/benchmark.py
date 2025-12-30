@@ -9,10 +9,19 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional
 
-import anthropic
+from instrumentation.timing import Timer, TimingResult
+from instrumentation.claude_sdk_client import ClaudeMaxClient
+from harness.runner import BenchmarkConfig, benchmark
 
-from ...instrumentation.timing import Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+
+def get_model_identifier(model: str) -> str:
+    """Map full model name to SDK model identifier."""
+    model_map = {
+        "claude-sonnet-4-20250514": "sonnet",
+        "claude-opus-4-5-20251101": "opus",
+        "claude-3-5-haiku-20241022": "haiku",
+    }
+    return model_map.get(model, "sonnet")
 
 
 @dataclass
@@ -36,30 +45,30 @@ class BaseAgent:
         self.name = name
         self.model = model
         self.system_prompt = system_prompt
-        self.client = anthropic.AsyncAnthropic()
+        sdk_model = get_model_identifier(model)
+        self.client = ClaudeMaxClient(model=sdk_model)
 
     async def execute(self, task: str, context: Optional[dict] = None) -> AgentResult:
         """Execute a task and return the result."""
         timer = Timer(self.name)
         timer.start()
 
-        messages = [{"role": "user", "content": task}]
+        prompt = task
         if context:
             context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
-            messages[0]["content"] = f"Context:\n{context_str}\n\nTask: {task}"
+            prompt = f"Context:\n{context_str}\n\nTask: {task}"
 
-        response = await self.client.messages.create(
-            model=self.model,
+        response = await self.client.create_message(
+            prompt=prompt,
             max_tokens=500,
-            system=self.system_prompt,
-            messages=messages,
+            system_prompt=self.system_prompt if self.system_prompt else None,
         )
 
         timer.stop()
 
         return AgentResult(
             agent_name=self.name,
-            output=response.content[0].text,
+            output=response.content,
             latency_ms=timer.elapsed_ms,
             tokens_used=response.usage.input_tokens + response.usage.output_tokens,
         )
@@ -335,8 +344,8 @@ async def compare_topologies(
     num_runs: int = 3,
 ) -> dict:
     """Compare all agent topologies."""
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()

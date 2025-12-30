@@ -20,6 +20,9 @@ import asyncio
 import sys
 from pathlib import Path
 
+# Add llm-latency-lab to path for package imports
+sys.path.insert(0, str(Path(__file__).parent / "llm-latency-lab"))
+
 
 async def run_streaming_benchmarks(args):
     """Run streaming benchmarks."""
@@ -95,13 +98,10 @@ async def run_all_benchmarks(args):
 
 async def run_baseline_scenarios(args):
     """Run baseline scenarios to establish performance baselines."""
-    import anthropic
     from scenarios import get_baseline_scenarios
     from instrumentation.timing import Timer, LatencyCollector
-    from harness.reporter import ConsoleReporter
+    from instrumentation.claude_sdk_client import ClaudeMaxClient
 
-    client = anthropic.AsyncAnthropic()
-    reporter = ConsoleReporter()
     collector = LatencyCollector()
 
     scenarios = get_baseline_scenarios()
@@ -111,6 +111,16 @@ async def run_baseline_scenarios(args):
     print("=" * 70)
     print(f"Model: {args.model}")
     print(f"Runs per scenario: {args.runs}")
+    print("Authentication: Claude Max Account (via Claude Agent SDK)")
+
+    # Map full model name to SDK model identifier
+    model_map = {
+        "claude-sonnet-4-20250514": "sonnet",
+        "claude-opus-4-5-20251101": "opus",
+        "claude-3-5-haiku-20241022": "haiku",
+    }
+    sdk_model = model_map.get(args.model, "sonnet")
+    client = ClaudeMaxClient(model=sdk_model)
 
     for scenario in scenarios:
         print(f"\n--- {scenario.name} ({scenario.category}) ---")
@@ -120,15 +130,11 @@ async def run_baseline_scenarios(args):
             timer = Timer(scenario.name)
             timer.start()
 
-            kwargs = {
-                "model": args.model,
-                "max_tokens": scenario.max_tokens,
-                "messages": [{"role": "user", "content": scenario.prompt}],
-            }
-            if scenario.system_prompt:
-                kwargs["system"] = scenario.system_prompt
-
-            response = await client.messages.create(**kwargs)
+            response = await client.create_message(
+                prompt=scenario.prompt,
+                max_tokens=scenario.max_tokens,
+                system_prompt=scenario.system_prompt,
+            )
 
             timer.stop()
             result = timer.to_result(

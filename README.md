@@ -9,14 +9,24 @@ This project provides tools and benchmarks for measuring the impact of common la
 ## Installation
 
 ```bash
-cd llm-latency-lab
 pip install -r requirements.txt
 ```
 
-Make sure you have your Anthropic API key set:
-```bash
-export ANTHROPIC_API_KEY=your_key_here
-```
+### Authentication
+
+This project uses the Claude Agent SDK with Claude Max account authentication. To set up:
+
+1. Install Claude Code CLI:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+
+2. Authenticate with your Claude Max account:
+   ```bash
+   claude login
+   ```
+
+Once authenticated, the benchmarks will use your Claude Max subscription automatically.
 
 ## Quick Start
 
@@ -39,6 +49,11 @@ Compares streaming vs non-streaming responses:
 - **TTFT (Time to First Token)**: How quickly users see initial content
 - **Perceived latency**: Up to 60-80% improvement with streaming
 
+**CLI Command:**
+```bash
+python main.py streaming
+```
+
 ```python
 from benchmarks.streaming import compare_streaming_vs_non_streaming
 
@@ -55,6 +70,11 @@ Tests Anthropic's `cache_control` feature:
 - **Latency reduction**: Up to 85% on cache hits
 - **Cost reduction**: Cached tokens at 10% of regular rate
 
+**CLI Command:**
+```bash
+python main.py caching
+```
+
 ```python
 from benchmarks.caching import CachingBenchmarkSuite
 
@@ -69,6 +89,11 @@ Tests parallel execution patterns:
 - **Batch processing**: Process multiple prompts in parallel
 - **Concurrency scaling**: How performance scales with concurrency
 
+**CLI Command:**
+```bash
+python main.py parallel
+```
+
 ```python
 from benchmarks.parallelism import compare_parallel_vs_sequential
 
@@ -80,6 +105,11 @@ results = await compare_parallel_vs_sequential(num_runs=5)
 Tests small model → large model routing:
 - **Classification accuracy**: How well small models identify task complexity
 - **Latency/cost tradeoffs**: When routing saves time vs adds overhead
+
+**CLI Command:**
+```bash
+python main.py routing
+```
 
 ```python
 from benchmarks.model_routing import compare_routing_strategies
@@ -93,6 +123,11 @@ Compares different multi-agent architectures:
 - **Flat single agent**: One agent handles everything
 - **Flat parallel**: Multiple specialists work in parallel
 - **Hierarchical**: Supervisor coordinates specialists
+
+**CLI Command:**
+```bash
+python main.py topology
+```
 
 ```python
 from benchmarks.agent_topology import compare_topologies
@@ -112,7 +147,8 @@ llm-latency-lab/
 │   └── agent_topology/     # Flat vs hierarchical supervisor
 ├── instrumentation/
 │   ├── timing.py           # Decorators, context managers
-│   └── traces.py           # OpenTelemetry / Langfuse integration
+│   ├── traces.py           # OpenTelemetry / Langfuse integration
+│   └── claude_sdk_client.py # Claude Agent SDK wrapper for Max auth
 ├── harness/
 │   ├── runner.py           # Benchmark orchestrator
 │   └── reporter.py         # Results aggregation, visualization
