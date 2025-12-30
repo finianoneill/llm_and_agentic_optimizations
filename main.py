@@ -20,6 +20,9 @@ import asyncio
 import sys
 from pathlib import Path
 
+# Add llm-latency-lab to path for package imports
+sys.path.insert(0, str(Path(__file__).parent / "llm-latency-lab"))
+
 
 async def run_streaming_benchmarks(args):
     """Run streaming benchmarks."""
