@@ -9,14 +9,24 @@ This project provides tools and benchmarks for measuring the impact of common la
 ## Installation
 
 ```bash
-cd llm-latency-lab
 pip install -r requirements.txt
 ```
 
-Make sure you have your Anthropic API key set:
-```bash
-export ANTHROPIC_API_KEY=your_key_here
-```
+### Authentication
+
+This project uses the Claude Agent SDK with Claude Max account authentication. To set up:
+
+1. Install Claude Code CLI:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+
+2. Authenticate with your Claude Max account:
+   ```bash
+   claude login
+   ```
+
+Once authenticated, the benchmarks will use your Claude Max subscription automatically.
 
 ## Quick Start
 
@@ -112,7 +122,8 @@ llm-latency-lab/
 │   └── agent_topology/     # Flat vs hierarchical supervisor
 ├── instrumentation/
 │   ├── timing.py           # Decorators, context managers
-│   └── traces.py           # OpenTelemetry / Langfuse integration
+│   ├── traces.py           # OpenTelemetry / Langfuse integration
+│   └── claude_sdk_client.py # Claude Agent SDK wrapper for Max auth
 ├── harness/
 │   ├── runner.py           # Benchmark orchestrator
 │   └── reporter.py         # Results aggregation, visualization
