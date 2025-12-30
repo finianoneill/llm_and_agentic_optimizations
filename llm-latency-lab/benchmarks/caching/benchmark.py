@@ -12,8 +12,8 @@ from typing import Any, Optional
 
 import anthropic
 
-from ...instrumentation.timing import Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+from instrumentation.timing import Timer, TimingResult
+from harness.runner import BenchmarkConfig, benchmark
 
 
 # Large system prompt to benefit from caching
@@ -227,8 +227,8 @@ async def compare_cached_vs_uncached(
 
     Demonstrates the latency benefits of prompt caching.
     """
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()

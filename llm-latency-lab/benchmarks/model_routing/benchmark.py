@@ -13,8 +13,8 @@ from typing import Optional
 
 import anthropic
 
-from ...instrumentation.timing import Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+from instrumentation.timing import Timer, TimingResult
+from harness.runner import BenchmarkConfig, benchmark
 
 
 class TaskComplexity(Enum):
@@ -198,8 +198,8 @@ async def compare_routing_strategies(
         prompts: List of (complexity_label, prompt) tuples
         num_runs: Number of runs per prompt
     """
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner(verbose=False)
     reporter = ConsoleReporter()

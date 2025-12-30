@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..instrumentation.timing import LatencyCollector, TimingResult
+from instrumentation.timing import LatencyCollector, TimingResult
 
 
 class OptimizationFlag(Enum):

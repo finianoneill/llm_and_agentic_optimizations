@@ -11,8 +11,8 @@ from typing import Any, Optional
 
 import anthropic
 
-from ...instrumentation.timing import Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+from instrumentation.timing import Timer, TimingResult
+from harness.runner import BenchmarkConfig, benchmark
 
 
 @dataclass
@@ -335,8 +335,8 @@ async def compare_topologies(
     num_runs: int = 3,
 ) -> dict:
     """Compare all agent topologies."""
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()

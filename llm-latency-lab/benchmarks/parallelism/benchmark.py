@@ -12,8 +12,8 @@ from typing import Any, Callable
 
 import anthropic
 
-from ...instrumentation.timing import Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+from instrumentation.timing import Timer, TimingResult
+from harness.runner import BenchmarkConfig, benchmark
 
 
 # Simulated tools with variable latency
@@ -249,8 +249,8 @@ async def compare_parallel_vs_sequential(
     num_runs: int = 5,
 ) -> dict:
     """Compare parallel vs sequential tool execution."""
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()

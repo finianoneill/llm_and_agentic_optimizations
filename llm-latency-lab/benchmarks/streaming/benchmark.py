@@ -10,8 +10,8 @@ from typing import Optional
 
 import anthropic
 
-from ...instrumentation.timing import StreamingTimer, Timer, TimingResult
-from ...harness.runner import BenchmarkConfig, benchmark
+from instrumentation.timing import StreamingTimer, Timer, TimingResult
+from harness.runner import BenchmarkConfig, benchmark
 
 
 @benchmark(streaming=True)
@@ -89,8 +89,8 @@ async def compare_streaming_vs_non_streaming(
 
     Returns a dictionary with both results for comparison.
     """
-    from ...harness.runner import BenchmarkRunner
-    from ...harness.reporter import ConsoleReporter
+    from harness.runner import BenchmarkRunner
+    from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()
