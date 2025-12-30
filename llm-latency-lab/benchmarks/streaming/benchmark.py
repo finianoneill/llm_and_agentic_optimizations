@@ -8,10 +8,19 @@ Time to First Token (TTFT) compared to waiting for the full response.
 import asyncio
 from typing import Optional
 
-import anthropic
-
 from instrumentation.timing import StreamingTimer, Timer, TimingResult
+from instrumentation.claude_sdk_client import ClaudeMaxClient
 from harness.runner import BenchmarkConfig, benchmark
+
+
+def get_model_identifier(model: str) -> str:
+    """Map full model name to SDK model identifier."""
+    model_map = {
+        "claude-sonnet-4-20250514": "sonnet",
+        "claude-opus-4-5-20251101": "opus",
+        "claude-3-5-haiku-20241022": "haiku",
+    }
+    return model_map.get(model, "sonnet")
 
 
 @benchmark(streaming=True)
@@ -24,31 +33,28 @@ async def streaming_response(config: BenchmarkConfig) -> TimingResult:
     - Inter-token latency
     - Token throughput
     """
-    client = anthropic.AsyncAnthropic()
+    sdk_model = get_model_identifier(config.model)
+    client = ClaudeMaxClient(model=sdk_model)
     timer = StreamingTimer("streaming_response")
     prompt = config.metadata.get("prompt", "Explain quantum computing in 3 paragraphs.")
 
     timer.start()
 
     total_tokens = 0
-    async with client.messages.stream(
-        model=config.model,
+    async for text in client.create_message_streaming(
+        prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        async for text in stream.text_stream:
-            timer.record_chunk()
-            total_tokens += len(text.split())  # Approximate token count
+    ):
+        timer.record_chunk()
+        total_tokens += len(text.split())  # Approximate token count
 
     timer.stop()
 
-    # Get actual token counts from the final message
-    final_message = await stream.get_final_message()
-
+    # Note: Streaming doesn't return usage info, use approximation
     return timer.to_result(
-        input_tokens=final_message.usage.input_tokens,
-        output_tokens=final_message.usage.output_tokens,
-        total_tokens=final_message.usage.input_tokens + final_message.usage.output_tokens,
+        input_tokens=0,  # Not available in streaming mode
+        output_tokens=total_tokens,
+        total_tokens=total_tokens,
     )
 
 
@@ -58,16 +64,16 @@ async def non_streaming_response(config: BenchmarkConfig) -> TimingResult:
 
     Measures total latency without streaming.
     """
-    client = anthropic.AsyncAnthropic()
+    sdk_model = get_model_identifier(config.model)
+    client = ClaudeMaxClient(model=sdk_model)
     timer = Timer("non_streaming_response")
     prompt = config.metadata.get("prompt", "Explain quantum computing in 3 paragraphs.")
 
     timer.start()
 
-    response = await client.messages.create(
-        model=config.model,
+    response = await client.create_message(
+        prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
-        messages=[{"role": "user", "content": prompt}],
     )
 
     timer.stop()

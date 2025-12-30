@@ -11,10 +11,19 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-import anthropic
-
 from instrumentation.timing import Timer, TimingResult
+from instrumentation.claude_sdk_client import ClaudeMaxClient
 from harness.runner import BenchmarkConfig, benchmark
+
+
+def get_model_identifier(model: str) -> str:
+    """Map full model name to SDK model identifier."""
+    model_map = {
+        "claude-sonnet-4-20250514": "sonnet",
+        "claude-opus-4-5-20251101": "opus",
+        "claude-3-5-haiku-20241022": "haiku",
+    }
+    return model_map.get(model, "sonnet")
 
 
 class TaskComplexity(Enum):
@@ -55,18 +64,20 @@ Respond with JSON only:
 
 async def classify_request(
     prompt: str,
-    client: anthropic.AsyncAnthropic,
+    client: ClaudeMaxClient = None,
 ) -> RoutingDecision:
     """Use a small model to classify request complexity."""
-    response = await client.messages.create(
-        model=SMALL_MODEL,
+    if client is None:
+        client = ClaudeMaxClient(model="haiku")
+
+    response = await client.create_message(
+        prompt=prompt,
         max_tokens=200,
-        system=CLASSIFIER_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        system_prompt=CLASSIFIER_SYSTEM_PROMPT,
     )
 
     try:
-        result = json.loads(response.content[0].text)
+        result = json.loads(response.content)
         complexity = TaskComplexity(result["complexity"])
         confidence = float(result.get("confidence", 0.8))
         reasoning = result.get("reasoning", "")
@@ -99,23 +110,24 @@ async def routed_request(config: BenchmarkConfig) -> TimingResult:
 
     First classifies the request, then routes to appropriate model.
     """
-    client = anthropic.AsyncAnthropic()
     timer = Timer("routed_request")
     prompt = config.metadata.get("prompt", "What is 2+2?")
 
     timer.start()
 
-    # Step 1: Classify
+    # Step 1: Classify using haiku
+    classifier_client = ClaudeMaxClient(model="haiku")
     classification_start = asyncio.get_event_loop().time()
-    routing = await classify_request(prompt, client)
+    routing = await classify_request(prompt, classifier_client)
     classification_time = (asyncio.get_event_loop().time() - classification_start) * 1000
 
     # Step 2: Generate with routed model
+    routed_sdk_model = get_model_identifier(routing.recommended_model)
+    generation_client = ClaudeMaxClient(model=routed_sdk_model)
     generation_start = asyncio.get_event_loop().time()
-    response = await client.messages.create(
-        model=routing.recommended_model,
+    response = await generation_client.create_message(
+        prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
-        messages=[{"role": "user", "content": prompt}],
     )
     generation_time = (asyncio.get_event_loop().time() - generation_start) * 1000
 
@@ -140,16 +152,15 @@ async def direct_large_model_request(config: BenchmarkConfig) -> TimingResult:
 
     No routing - always uses the large model.
     """
-    client = anthropic.AsyncAnthropic()
+    client = ClaudeMaxClient(model="sonnet")
     timer = Timer("direct_large_model")
     prompt = config.metadata.get("prompt", "What is 2+2?")
 
     timer.start()
 
-    response = await client.messages.create(
-        model=LARGE_MODEL,
+    response = await client.create_message(
+        prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
-        messages=[{"role": "user", "content": prompt}],
     )
 
     timer.stop()
@@ -167,16 +178,15 @@ async def direct_small_model_request(config: BenchmarkConfig) -> TimingResult:
 
     For comparison - shows small model baseline latency.
     """
-    client = anthropic.AsyncAnthropic()
+    client = ClaudeMaxClient(model="haiku")
     timer = Timer("direct_small_model")
     prompt = config.metadata.get("prompt", "What is 2+2?")
 
     timer.start()
 
-    response = await client.messages.create(
-        model=SMALL_MODEL,
+    response = await client.create_message(
+        prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
-        messages=[{"role": "user", "content": prompt}],
     )
 
     timer.stop()
@@ -325,7 +335,7 @@ class RoutingBenchmarkSuite:
         test_cases: Optional[list[tuple[str, str]]] = None,
     ) -> dict:
         """Test the accuracy of the classification model."""
-        client = anthropic.AsyncAnthropic()
+        client = ClaudeMaxClient(model="haiku")
 
         if test_cases is None:
             test_cases = [

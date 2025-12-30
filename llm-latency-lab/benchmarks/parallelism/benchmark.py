@@ -3,6 +3,9 @@ Parallelism benchmarks - Parallel tool calls and async patterns.
 
 Tests the impact of parallel execution on wall-clock latency
 for tool-using agents and batch processing.
+
+Note: Tool-based benchmarks use simulated tools. The primary focus
+is on demonstrating parallel execution patterns with the Claude API.
 """
 
 import asyncio
@@ -10,10 +13,19 @@ import random
 import time
 from typing import Any, Callable
 
-import anthropic
-
 from instrumentation.timing import Timer, TimingResult
+from instrumentation.claude_sdk_client import ClaudeMaxClient
 from harness.runner import BenchmarkConfig, benchmark
+
+
+def get_model_identifier(model: str) -> str:
+    """Map full model name to SDK model identifier."""
+    model_map = {
+        "claude-sonnet-4-20250514": "sonnet",
+        "claude-opus-4-5-20251101": "opus",
+        "claude-3-5-haiku-20241022": "haiku",
+    }
+    return model_map.get(model, "sonnet")
 
 
 # Simulated tools with variable latency
@@ -110,58 +122,28 @@ async def execute_tool(name: str, args: dict) -> dict:
 async def sequential_tool_execution(config: BenchmarkConfig) -> TimingResult:
     """Benchmark sequential tool execution.
 
-    Executes tools one at a time.
+    Executes simulated tools one at a time to demonstrate sequential pattern.
     """
-    client = anthropic.AsyncAnthropic()
     timer = Timer("sequential_tools")
-    prompt = config.metadata.get(
-        "prompt",
-        "I need you to: 1) Query the database for user stats, "
-        "2) Call the analytics API, 3) Read the config file, "
-        "4) Compute the monthly summary. Use the available tools."
-    )
 
     timer.start()
-
-    response = await client.messages.create(
-        model=config.model,
-        max_tokens=1024,
-        tools=TOOLS,
-        messages=[{"role": "user", "content": prompt}],
-    )
 
     tool_calls_count = 0
     tool_execution_time = 0
 
-    # Handle tool calls sequentially
-    while response.stop_reason == "tool_use":
-        tool_results = []
-        for content in response.content:
-            if content.type == "tool_use":
-                tool_calls_count += 1
-                tool_start = time.perf_counter()
+    # Execute all simulated tools sequentially
+    tools_to_execute = [
+        ("database_query", {"query": "SELECT * FROM users"}),
+        ("api_call", {"endpoint": "/analytics"}),
+        ("read_file", {"path": "/config.json"}),
+        ("compute", {"input_data": "monthly_summary"}),
+    ]
 
-                # Execute sequentially (one at a time)
-                result = await execute_tool(content.name, content.input)
-
-                tool_execution_time += time.perf_counter() - tool_start
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": content.id,
-                    "content": str(result),
-                })
-
-        # Continue conversation
-        response = await client.messages.create(
-            model=config.model,
-            max_tokens=1024,
-            tools=TOOLS,
-            messages=[
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": response.content},
-                {"role": "user", "content": tool_results},
-            ],
-        )
+    for tool_name, tool_args in tools_to_execute:
+        tool_calls_count += 1
+        tool_start = time.perf_counter()
+        await execute_tool(tool_name, tool_args)
+        tool_execution_time += time.perf_counter() - tool_start
 
     timer.stop()
 
@@ -177,68 +159,35 @@ async def sequential_tool_execution(config: BenchmarkConfig) -> TimingResult:
 async def parallel_tool_execution(config: BenchmarkConfig) -> TimingResult:
     """Benchmark parallel tool execution.
 
-    Executes all tools concurrently.
+    Executes all simulated tools concurrently to demonstrate parallel pattern.
     """
-    client = anthropic.AsyncAnthropic()
     timer = Timer("parallel_tools")
-    prompt = config.metadata.get(
-        "prompt",
-        "I need you to: 1) Query the database for user stats, "
-        "2) Call the analytics API, 3) Read the config file, "
-        "4) Compute the monthly summary. Use the available tools."
-    )
 
     timer.start()
 
-    response = await client.messages.create(
-        model=config.model,
-        max_tokens=1024,
-        tools=TOOLS,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    tool_calls_count = 0
     tool_execution_time = 0
 
-    # Handle tool calls in parallel
-    while response.stop_reason == "tool_use":
-        tool_uses = [c for c in response.content if c.type == "tool_use"]
-        tool_calls_count += len(tool_uses)
+    # Execute all simulated tools in parallel
+    tools_to_execute = [
+        ("database_query", {"query": "SELECT * FROM users"}),
+        ("api_call", {"endpoint": "/analytics"}),
+        ("read_file", {"path": "/config.json"}),
+        ("compute", {"input_data": "monthly_summary"}),
+    ]
 
-        tool_start = time.perf_counter()
+    tool_start = time.perf_counter()
 
-        # Execute all tools concurrently
-        tasks = [execute_tool(tu.name, tu.input) for tu in tool_uses]
-        results = await asyncio.gather(*tasks)
+    # Execute all tools concurrently
+    tasks = [execute_tool(name, args) for name, args in tools_to_execute]
+    await asyncio.gather(*tasks)
 
-        tool_execution_time += time.perf_counter() - tool_start
-
-        tool_results = [
-            {
-                "type": "tool_result",
-                "tool_use_id": tu.id,
-                "content": str(result),
-            }
-            for tu, result in zip(tool_uses, results)
-        ]
-
-        # Continue conversation
-        response = await client.messages.create(
-            model=config.model,
-            max_tokens=1024,
-            tools=TOOLS,
-            messages=[
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": response.content},
-                {"role": "user", "content": tool_results},
-            ],
-        )
+    tool_execution_time = time.perf_counter() - tool_start
 
     timer.stop()
 
     return timer.to_result(
         metadata={
-            "tool_calls": tool_calls_count,
+            "tool_calls": len(tools_to_execute),
             "tool_execution_time_ms": tool_execution_time * 1000,
         }
     )
@@ -304,7 +253,8 @@ async def batch_processing_comparison(
     model: str = "claude-sonnet-4-20250514",
 ) -> dict:
     """Compare sequential vs parallel batch processing of multiple prompts."""
-    client = anthropic.AsyncAnthropic()
+    sdk_model = get_model_identifier(model)
+    client = ClaudeMaxClient(model=sdk_model)
 
     if not prompts:
         prompts = [
@@ -326,10 +276,9 @@ async def batch_processing_comparison(
 
     seq_results = []
     for prompt in prompts:
-        response = await client.messages.create(
-            model=model,
+        response = await client.create_message(
+            prompt=prompt,
             max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
         )
         seq_results.append(response)
 
@@ -341,10 +290,9 @@ async def batch_processing_comparison(
     par_timer.start()
 
     tasks = [
-        client.messages.create(
-            model=model,
+        client.create_message(
+            prompt=prompt,
             max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
         )
         for prompt in prompts
     ]
@@ -404,7 +352,8 @@ class ParallelismBenchmarkSuite:
         max_concurrency: int = 10,
     ) -> list[dict]:
         """Test how latency scales with different concurrency levels."""
-        client = anthropic.AsyncAnthropic()
+        sdk_model = get_model_identifier(self.model)
+        client = ClaudeMaxClient(model=sdk_model)
         results = []
 
         prompt = "What is AI?"
@@ -421,10 +370,9 @@ class ParallelismBenchmarkSuite:
             timer.start()
 
             tasks = [
-                client.messages.create(
-                    model=self.model,
+                client.create_message(
+                    prompt=prompt,
                     max_tokens=100,
-                    messages=[{"role": "user", "content": prompt}],
                 )
                 for _ in range(concurrency)
             ]
