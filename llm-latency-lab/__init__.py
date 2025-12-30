@@ -12,7 +12,7 @@ Key modules:
 """
 
 __version__ = "0.1.0"
-__author__ = "LLM Latency Lab Contributors"
+__author__ = "Finian O'Neill"
 
 from . import benchmarks
 from . import instrumentation
