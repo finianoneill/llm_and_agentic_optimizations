@@ -197,20 +197,14 @@ class ClaudeMaxClient:
                         yield block.text
 
 
-async def get_client(use_max_account: bool = False, model: str = "sonnet"):
+def get_client(model: str = "sonnet") -> ClaudeMaxClient:
     """
-    Factory function to get the appropriate Claude client.
+    Factory function to get a Claude client.
 
     Args:
-        use_max_account: If True, use Claude Agent SDK with Max auth.
-                        If False, use standard Anthropic SDK with API key.
-        model: Model to use (for Max client)
+        model: Model to use - "opus", "sonnet", or "haiku"
 
     Returns:
-        Either ClaudeMaxClient or anthropic.AsyncAnthropic client
+        ClaudeMaxClient instance
     """
-    if use_max_account:
-        return ClaudeMaxClient(model=model)
-    else:
-        import anthropic
-        return anthropic.AsyncAnthropic()
+    return ClaudeMaxClient(model=model)
