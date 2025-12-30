@@ -26,6 +26,13 @@ from .traces import (
     LANGFUSE_AVAILABLE,
 )
 
+from .claude_sdk_client import (
+    ClaudeMaxClient,
+    get_client,
+    Message,
+    Usage,
+)
+
 __all__ = [
     # Timing
     "Timer",
@@ -45,4 +52,9 @@ __all__ = [
     "shutdown_tracing",
     "OTEL_AVAILABLE",
     "LANGFUSE_AVAILABLE",
+    # Claude SDK Client
+    "ClaudeMaxClient",
+    "get_client",
+    "Message",
+    "Usage",
 ]

@@ -103,12 +103,10 @@ async def run_all_benchmarks(args):
 
 async def run_baseline_scenarios(args):
     """Run baseline scenarios to establish performance baselines."""
-    import anthropic
     from scenarios import get_baseline_scenarios
     from instrumentation.timing import Timer, LatencyCollector
     from harness.reporter import ConsoleReporter
 
-    client = anthropic.AsyncAnthropic()
     reporter = ConsoleReporter()
     collector = LatencyCollector()
 
@@ -120,31 +118,71 @@ async def run_baseline_scenarios(args):
     print(f"Model: {args.model}")
     print(f"Runs per scenario: {args.runs}")
 
-    for scenario in scenarios:
-        print(f"\n--- {scenario.name} ({scenario.category}) ---")
-        print(f"Prompt: {scenario.prompt[:60]}...")
+    if args.max_account:
+        print("Authentication: Claude Max Account (via Claude Agent SDK)")
+        from instrumentation.claude_sdk_client import ClaudeMaxClient
 
-        for i in range(args.runs):
-            timer = Timer(scenario.name)
-            timer.start()
+        # Map full model name to SDK model identifier
+        model_map = {
+            "claude-sonnet-4-20250514": "sonnet",
+            "claude-opus-4-5-20251101": "opus",
+            "claude-3-5-haiku-20241022": "haiku",
+        }
+        sdk_model = model_map.get(args.model, "sonnet")
+        client = ClaudeMaxClient(model=sdk_model)
 
-            kwargs = {
-                "model": args.model,
-                "max_tokens": scenario.max_tokens,
-                "messages": [{"role": "user", "content": scenario.prompt}],
-            }
-            if scenario.system_prompt:
-                kwargs["system"] = scenario.system_prompt
+        for scenario in scenarios:
+            print(f"\n--- {scenario.name} ({scenario.category}) ---")
+            print(f"Prompt: {scenario.prompt[:60]}...")
 
-            response = await client.messages.create(**kwargs)
+            for i in range(args.runs):
+                timer = Timer(scenario.name)
+                timer.start()
 
-            timer.stop()
-            result = timer.to_result(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-            )
-            collector.add(result)
-            print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms")
+                response = await client.create_message(
+                    prompt=scenario.prompt,
+                    max_tokens=scenario.max_tokens,
+                    system_prompt=scenario.system_prompt,
+                )
+
+                timer.stop()
+                result = timer.to_result(
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                )
+                collector.add(result)
+                print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms")
+    else:
+        print("Authentication: API Key (via Anthropic SDK)")
+        import anthropic
+
+        client = anthropic.AsyncAnthropic()
+
+        for scenario in scenarios:
+            print(f"\n--- {scenario.name} ({scenario.category}) ---")
+            print(f"Prompt: {scenario.prompt[:60]}...")
+
+            for i in range(args.runs):
+                timer = Timer(scenario.name)
+                timer.start()
+
+                kwargs = {
+                    "model": args.model,
+                    "max_tokens": scenario.max_tokens,
+                    "messages": [{"role": "user", "content": scenario.prompt}],
+                }
+                if scenario.system_prompt:
+                    kwargs["system"] = scenario.system_prompt
+
+                response = await client.messages.create(**kwargs)
+
+                timer.stop()
+                result = timer.to_result(
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                )
+                collector.add(result)
+                print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms")
 
     stats = collector.stats()
     print("\n" + "=" * 70)
@@ -195,6 +233,11 @@ Examples:
         type=Path,
         default=Path("results"),
         help="Directory to save results (default: results/)",
+    )
+    parser.add_argument(
+        "--max-account",
+        action="store_true",
+        help="Use Claude Max account authentication via Claude Agent SDK instead of API key",
     )
 
     args = parser.parse_args()
