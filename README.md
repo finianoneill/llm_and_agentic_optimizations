@@ -135,28 +135,173 @@ from benchmarks.agent_topology import compare_topologies
 results = await compare_topologies(num_runs=3)
 ```
 
+## Docker Compose Setup
+
+A full-stack Docker application is available with a web UI, API, and LLM observability via self-hosted Langfuse v3.
+
+### Architecture
+
+```
+Traefik v3.6 (Reverse Proxy :80)
+├── app.localhost      → Streamlit (Dashboard UI)
+│   └── /api/*         → FastAPI (Benchmark API)
+├── langfuse.localhost → Langfuse Web (LLM Observability)
+└── traefik.localhost  → Traefik Dashboard
+
+Langfuse v3 Stack:
+├── langfuse-web       → Web UI & API
+├── langfuse-worker    → Background job processing
+├── PostgreSQL         → Primary database
+├── ClickHouse         → Analytics/traces storage
+├── Redis              → Cache & queue
+└── MinIO              → S3-compatible object storage
+```
+
+### Prerequisites
+
+1. Ensure Claude Code CLI is installed and authenticated on your host:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   claude login
+   ```
+
+2. Docker and Docker Compose v2+ installed
+
+### Quick Start
+
+```bash
+# From the repository root, start all services
+docker compose -f docker/docker-compose.yml up -d --build
+
+# View logs
+docker compose -f docker/docker-compose.yml logs -f
+
+# View logs for a specific service
+docker compose -f docker/docker-compose.yml logs -f langfuse-web
+```
+
+### Access Points
+
+Once running, access the services at:
+
+| URL | Service |
+|-----|---------|
+| http://app.localhost | Streamlit Dashboard UI |
+| http://app.localhost/api/docs | FastAPI Swagger Docs |
+| http://langfuse.localhost | Langfuse Observability Console |
+| http://traefik.localhost | Traefik Dashboard |
+
+> **Note:** The `.localhost` TLD resolves to `127.0.0.1` automatically in modern browsers without `/etc/hosts` configuration.
+
+### Environment Variables
+
+Create a `docker/.env` file to customize secrets (recommended for production):
+
+```bash
+# PostgreSQL
+POSTGRES_PASSWORD=your-secure-password
+
+# ClickHouse
+CLICKHOUSE_PASSWORD=your-clickhouse-password
+
+# Redis
+REDIS_AUTH=your-redis-password
+
+# MinIO
+MINIO_ROOT_USER=minio
+MINIO_ROOT_PASSWORD=your-minio-password
+
+# Langfuse Auth (use long random strings)
+NEXTAUTH_SECRET=your-nextauth-secret-min-32-chars
+SALT=your-salt-for-api-keys
+ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000  # 64 hex chars
+
+# Langfuse API Keys (create in Langfuse UI after first login)
+LANGFUSE_PUBLIC_KEY=pk-...
+LANGFUSE_SECRET_KEY=sk-...
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/benchmarks` | GET | List available benchmarks |
+| `/api/benchmarks/{type}/run` | POST | Start a benchmark (returns job ID) |
+| `/api/jobs` | GET | List all jobs |
+| `/api/jobs/{job_id}` | GET | Get job status |
+| `/api/ws/{job_id}` | WS | WebSocket for real-time progress |
+| `/api/results` | GET | List saved results |
+| `/api/results/{filename}` | GET | Get specific result |
+
+### Services
+
+| Container | Image | Purpose |
+|-----------|-------|---------|
+| llm-lab-traefik | traefik:v3.6 | Reverse proxy & routing |
+| llm-lab-ui | docker-streamlit | Dashboard UI |
+| llm-lab-api | docker-fastapi | Benchmark API |
+| llm-lab-langfuse-web | langfuse/langfuse:3 | Langfuse web interface |
+| llm-lab-langfuse-worker | langfuse/langfuse-worker:3 | Background processing |
+| llm-lab-postgres | postgres:15 | Primary database |
+| llm-lab-clickhouse | clickhouse/clickhouse-server:24.3 | Analytics database |
+| llm-lab-redis | redis:7 | Cache & queue |
+| llm-lab-minio | minio/minio:latest | Object storage |
+
+### Stopping Services
+
+```bash
+# Stop all services
+docker compose -f docker/docker-compose.yml down
+
+# Stop and remove volumes (deletes all data)
+docker compose -f docker/docker-compose.yml down -v
+```
+
+### Troubleshooting
+
+**Traefik returning 404:**
+- Ensure you're using Traefik v3.6+ (older versions have Docker socket issues on macOS)
+- Check that Docker Desktop is running and the socket is accessible
+
+**Langfuse not starting:**
+- Wait for PostgreSQL, ClickHouse, Redis, and MinIO to become healthy first
+- Check logs: `docker compose -f docker/docker-compose.yml logs langfuse-web`
+
 ## Project Structure
 
 ```
-llm-latency-lab/
-├── benchmarks/
-│   ├── streaming/          # TTFT vs full response comparison
-│   ├── caching/            # Prompt caching, semantic caching
-│   ├── parallelism/        # Parallel tool calls, async patterns
-│   ├── model_routing/      # Small model → large model routing
-│   └── agent_topology/     # Flat vs hierarchical supervisor
-├── instrumentation/
-│   ├── timing.py           # Decorators, context managers
-│   ├── traces.py           # OpenTelemetry / Langfuse integration
-│   └── claude_sdk_client.py # Claude Agent SDK wrapper for Max auth
-├── harness/
-│   ├── runner.py           # Benchmark orchestrator
-│   └── reporter.py         # Results aggregation, visualization
-├── scenarios/
-│   └── definitions.py      # Realistic task definitions
-├── results/                # Stored benchmark outputs
+.
 ├── main.py                 # CLI entry point
-└── requirements.txt
+├── requirements.txt
+├── llm-latency-lab/
+│   ├── benchmarks/
+│   │   ├── streaming/      # TTFT vs full response comparison
+│   │   ├── caching/        # Prompt caching, semantic caching
+│   │   ├── parallelism/    # Parallel tool calls, async patterns
+│   │   ├── model_routing/  # Small model → large model routing
+│   │   └── agent_topology/ # Flat vs hierarchical supervisor
+│   ├── instrumentation/
+│   │   ├── timing.py       # Decorators, context managers
+│   │   ├── traces.py       # OpenTelemetry / Langfuse integration
+│   │   └── claude_sdk_client.py
+│   ├── harness/
+│   │   ├── runner.py       # Benchmark orchestrator
+│   │   └── reporter.py     # Results aggregation, visualization
+│   ├── scenarios/
+│   │   └── definitions.py  # Realistic task definitions
+│   └── results/            # Stored benchmark outputs
+└── docker/
+    ├── docker-compose.yml  # Full stack orchestration
+    ├── .env.example        # Environment template
+    ├── traefik/
+    │   └── traefik.yml     # Traefik static config
+    ├── fastapi/
+    │   ├── Dockerfile
+    │   └── app/            # Benchmark API source
+    └── streamlit/
+        ├── Dockerfile
+        └── app.py          # Dashboard UI source
 ```
 
 ## Instrumentation
