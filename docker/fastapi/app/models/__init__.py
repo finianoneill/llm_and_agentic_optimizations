@@ -10,6 +10,10 @@ from .schemas import (
     BenchmarkInfo,
     ProgressUpdate,
     ResultSummary,
+    HealthResponse,
+    StatsSchema,
+    TimingResultSchema,
+    BenchmarkResultSchema,
 )
 
 __all__ = [
@@ -22,4 +26,8 @@ __all__ = [
     "BenchmarkInfo",
     "ProgressUpdate",
     "ResultSummary",
+    "HealthResponse",
+    "StatsSchema",
+    "TimingResultSchema",
+    "BenchmarkResultSchema",
 ]
