@@ -212,6 +212,52 @@ class ClaudeMaxClient:
             model=result_model,
         )
 
+    async def _create_message_streaming_via_proxy(
+        self,
+        prompt: str,
+        max_tokens: int = 1024,
+        system_prompt: str | None = None,
+        model: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Create a streaming message using the host proxy."""
+        import aiohttp
+
+        model_to_use = model or self.model
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self._proxy_url}/query/stream",
+                json={
+                    "prompt": full_prompt,
+                    "model": model_to_use,
+                    "max_tokens": max_tokens,
+                },
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                async for line in resp.content:
+                    line = line.decode().strip()
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            import json
+                            parsed = json.loads(data)
+                            if "result" in parsed:
+                                yield parsed["result"]
+                            elif "content" in parsed:
+                                yield parsed["content"]
+                            else:
+                                # Raw text chunk
+                                yield data
+                        except:
+                            # Not JSON, yield as-is
+                            if data:
+                                yield data
+
     async def create_message_streaming(
         self,
         prompt: str,
@@ -220,7 +266,7 @@ class ClaudeMaxClient:
         model: str | None = None,
     ) -> AsyncIterator[str]:
         """
-        Create a streaming message using Claude Agent SDK.
+        Create a streaming message using Claude Agent SDK or proxy.
 
         Args:
             prompt: The user prompt
@@ -231,6 +277,17 @@ class ClaudeMaxClient:
         Yields:
             Text chunks as they arrive
         """
+        # Use proxy if available (for Docker deployments)
+        if self._proxy_url:
+            async for chunk in self._create_message_streaming_via_proxy(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                model=model,
+            ):
+                yield chunk
+            return
+
         from claude_agent_sdk import (
             query,
             ClaudeAgentOptions,

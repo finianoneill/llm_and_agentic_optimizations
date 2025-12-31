@@ -83,6 +83,9 @@ async def query_streaming(request):
     """
     Streaming query to Claude CLI.
     Returns Server-Sent Events.
+
+    Note: Claude CLI doesn't have a true streaming mode via subprocess,
+    so we fall back to returning the full response as a single chunk.
     """
     try:
         data = await request.json()
@@ -103,12 +106,12 @@ async def query_streaming(request):
         )
         await response.prepare(request)
 
-        # Run Claude CLI with streaming
+        # Run Claude CLI (non-streaming, but return as SSE)
         cmd = [
             "claude",
             "-p", prompt,
             "--model", model,
-            "--output-format", "stream-json",
+            "--output-format", "json",
         ]
 
         process = await asyncio.create_subprocess_exec(
@@ -117,11 +120,20 @@ async def query_streaming(request):
             stderr=asyncio.subprocess.PIPE,
         )
 
-        async for line in process.stdout:
-            if line:
-                await response.write(f"data: {line.decode()}\n\n".encode())
+        stdout, stderr = await process.communicate()
 
-        await process.wait()
+        if process.returncode == 0 and stdout:
+            try:
+                result = json.loads(stdout.decode())
+                # Send the result text as a single chunk
+                text = result.get("result", "")
+                if text:
+                    await response.write(f"data: {json.dumps({'content': text})}\n\n".encode())
+            except json.JSONDecodeError:
+                await response.write(f"data: {json.dumps({'content': stdout.decode()})}\n\n".encode())
+        elif stderr:
+            await response.write(f"data: {json.dumps({'error': stderr.decode()})}\n\n".encode())
+
         await response.write(b"data: [DONE]\n\n")
         await response.write_eof()
 
