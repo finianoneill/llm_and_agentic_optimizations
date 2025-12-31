@@ -6,6 +6,8 @@ demonstrates semantic caching patterns.
 
 Note: When using Claude Max authentication via the Claude Agent SDK,
 caching is handled automatically by the underlying infrastructure.
+
+All LLM calls are automatically traced to Langfuse when configured.
 """
 
 import asyncio
@@ -15,6 +17,7 @@ from typing import Any, Optional
 
 from instrumentation.timing import Timer, TimingResult
 from instrumentation.claude_sdk_client import ClaudeMaxClient
+from instrumentation.traces import flush_langfuse, get_langfuse_tracer
 from harness.runner import BenchmarkConfig, benchmark
 
 
@@ -80,6 +83,7 @@ async def cached_prompt_request(config: BenchmarkConfig) -> TimingResult:
 
     Note: With Claude Max SDK, caching behavior is managed by the infrastructure.
     The system prompt is passed and caching may occur automatically.
+    All calls are traced to Langfuse automatically.
     """
     sdk_model = get_model_identifier(config.model)
     client = ClaudeMaxClient(model=sdk_model)
@@ -93,6 +97,12 @@ async def cached_prompt_request(config: BenchmarkConfig) -> TimingResult:
         prompt=user_prompt,
         max_tokens=config.metadata.get("max_tokens", 300),
         system_prompt=system_prompt,
+        trace_name="cached_prompt_benchmark",
+        trace_metadata={
+            "benchmark": "cached_prompt_request",
+            "config_name": config.name,
+            "cache_control_enabled": True,
+        },
     )
 
     timer.stop()
@@ -117,6 +127,7 @@ async def uncached_prompt_request(config: BenchmarkConfig) -> TimingResult:
     """Benchmark request without prompt caching (baseline).
 
     Note: With Claude Max SDK, caching behavior is managed by infrastructure.
+    All calls are traced to Langfuse automatically.
     """
     sdk_model = get_model_identifier(config.model)
     client = ClaudeMaxClient(model=sdk_model)
@@ -130,6 +141,12 @@ async def uncached_prompt_request(config: BenchmarkConfig) -> TimingResult:
         prompt=user_prompt,
         max_tokens=config.metadata.get("max_tokens", 300),
         system_prompt=system_prompt,
+        trace_name="uncached_prompt_benchmark",
+        trace_metadata={
+            "benchmark": "uncached_prompt_request",
+            "config_name": config.name,
+            "cache_control_enabled": False,
+        },
     )
 
     timer.stop()
@@ -180,6 +197,7 @@ async def semantic_cached_request(config: BenchmarkConfig) -> TimingResult:
     """Benchmark request with semantic caching layer.
 
     Checks semantic cache before making API call.
+    All calls are traced to Langfuse automatically.
     """
     timer = Timer("semantic_cached")
     user_prompt = config.metadata.get("prompt", "What is machine learning?")
@@ -204,6 +222,12 @@ async def semantic_cached_request(config: BenchmarkConfig) -> TimingResult:
     response = await client.create_message(
         prompt=user_prompt,
         max_tokens=config.metadata.get("max_tokens", 300),
+        trace_name="semantic_cached_benchmark",
+        trace_metadata={
+            "benchmark": "semantic_cached_request",
+            "config_name": config.name,
+            "semantic_cache_miss": True,
+        },
     )
 
     # Store in cache
@@ -233,12 +257,18 @@ async def compare_cached_vs_uncached(
     """Run a comparison between cached and uncached requests.
 
     Demonstrates the latency benefits of prompt caching.
+    All LLM calls are traced to Langfuse when configured.
     """
     from harness.runner import BenchmarkRunner
     from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()
+
+    # Initialize Langfuse tracer (will use env vars)
+    langfuse_tracer = get_langfuse_tracer()
+    if langfuse_tracer:
+        print("Langfuse tracing enabled for caching benchmark comparison")
 
     # Different prompts that share the same system prompt
     prompts = [
@@ -276,55 +306,60 @@ async def compare_cached_vs_uncached(
     print("=" * 60)
     print(f"System prompt size: ~{len(LARGE_SYSTEM_PROMPT)} characters")
 
-    # Run cached benchmark with rotating prompts
-    print("\n--- Cached Requests ---")
-    cached_results = []
-    for i in range(num_runs):
-        prompt = prompts[i % len(prompts)]
-        cached_config.metadata["prompt"] = prompt
-        result = await runner.run_single(cached_prompt_request, cached_config)
-        cached_results.append(result)
+    try:
+        # Run cached benchmark with rotating prompts
+        print("\n--- Cached Requests ---")
+        cached_results = []
+        for i in range(num_runs):
+            prompt = prompts[i % len(prompts)]
+            cached_config.metadata["prompt"] = prompt
+            result = await runner.run_single(cached_prompt_request, cached_config)
+            cached_results.append(result)
 
-        # Show cache status
-        cache_status = "HIT" if result.cache_hit else "MISS (warming)"
-        print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms - Cache: {cache_status}")
+            # Show cache status
+            cache_status = "HIT" if result.cache_hit else "MISS (warming)"
+            print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms - Cache: {cache_status}")
 
-    # Run uncached baseline
-    print("\n--- Uncached Baseline ---")
-    uncached_results = []
-    for i in range(num_runs):
-        prompt = prompts[i % len(prompts)]
-        uncached_config.metadata["prompt"] = prompt
-        result = await runner.run_single(uncached_prompt_request, uncached_config)
-        uncached_results.append(result)
-        print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms")
+        # Run uncached baseline
+        print("\n--- Uncached Baseline ---")
+        uncached_results = []
+        for i in range(num_runs):
+            prompt = prompts[i % len(prompts)]
+            uncached_config.metadata["prompt"] = prompt
+            result = await runner.run_single(uncached_prompt_request, uncached_config)
+            uncached_results.append(result)
+            print(f"  Run {i+1}: {result.total_latency_ms:.0f}ms")
 
-    # Calculate stats
-    cached_latencies = [r.total_latency_ms for r in cached_results]
-    uncached_latencies = [r.total_latency_ms for r in uncached_results]
+        # Calculate stats
+        cached_latencies = [r.total_latency_ms for r in cached_results]
+        uncached_latencies = [r.total_latency_ms for r in uncached_results]
 
-    # Only compare cache hits for fair comparison
-    cached_hit_latencies = [r.total_latency_ms for r in cached_results if r.cache_hit]
+        # Only compare cache hits for fair comparison
+        cached_hit_latencies = [r.total_latency_ms for r in cached_results if r.cache_hit]
 
-    print("\n" + "=" * 60)
-    print("Results Summary")
-    print("=" * 60)
-    print(f"\nUncached baseline:")
-    print(f"  Mean latency: {sum(uncached_latencies)/len(uncached_latencies):.0f}ms")
+        print("\n" + "=" * 60)
+        print("Results Summary")
+        print("=" * 60)
+        print(f"\nUncached baseline:")
+        print(f"  Mean latency: {sum(uncached_latencies)/len(uncached_latencies):.0f}ms")
 
-    print(f"\nWith prompt caching:")
-    print(f"  Mean latency (all): {sum(cached_latencies)/len(cached_latencies):.0f}ms")
-    if cached_hit_latencies:
-        mean_hits = sum(cached_hit_latencies)/len(cached_hit_latencies)
-        print(f"  Mean latency (cache hits only): {mean_hits:.0f}ms")
-        improvement = ((sum(uncached_latencies)/len(uncached_latencies) - mean_hits) /
-                      (sum(uncached_latencies)/len(uncached_latencies))) * 100
-        print(f"  Latency improvement on cache hits: {improvement:.1f}%")
+        print(f"\nWith prompt caching:")
+        print(f"  Mean latency (all): {sum(cached_latencies)/len(cached_latencies):.0f}ms")
+        if cached_hit_latencies:
+            mean_hits = sum(cached_hit_latencies)/len(cached_hit_latencies)
+            print(f"  Mean latency (cache hits only): {mean_hits:.0f}ms")
+            improvement = ((sum(uncached_latencies)/len(uncached_latencies) - mean_hits) /
+                          (sum(uncached_latencies)/len(uncached_latencies))) * 100
+            print(f"  Latency improvement on cache hits: {improvement:.1f}%")
 
-    return {
-        "cached_results": cached_results,
-        "uncached_results": uncached_results,
-    }
+        return {
+            "cached_results": cached_results,
+            "uncached_results": uncached_results,
+        }
+    finally:
+        # Flush Langfuse traces to ensure they are sent
+        flush_langfuse()
+        print("Langfuse traces flushed")
 
 
 async def test_cache_warmup_pattern(
@@ -334,44 +369,60 @@ async def test_cache_warmup_pattern(
 
     Shows how the first request warms the cache and subsequent requests benefit.
     Note: With Claude Max SDK, caching is managed by infrastructure.
+    All LLM calls are traced to Langfuse when configured.
     """
     sdk_model = get_model_identifier(model)
     client = ClaudeMaxClient(model=sdk_model)
     results = []
 
+    # Initialize Langfuse tracer
+    langfuse_tracer = get_langfuse_tracer()
+    if langfuse_tracer:
+        print("Langfuse tracing enabled for cache warmup test")
+
     print("\n" + "=" * 60)
     print("Cache Warm-up Pattern Demonstration")
     print("=" * 60)
 
-    for i in range(5):
-        timer = Timer(f"request_{i+1}")
-        timer.start()
+    try:
+        for i in range(5):
+            timer = Timer(f"request_{i+1}")
+            timer.start()
 
-        response = await client.create_message(
-            prompt=f"Question {i+1}: What is AI?",
-            max_tokens=100,
-            system_prompt=LARGE_SYSTEM_PROMPT,
-        )
+            response = await client.create_message(
+                prompt=f"Question {i+1}: What is AI?",
+                max_tokens=100,
+                system_prompt=LARGE_SYSTEM_PROMPT,
+                trace_name="cache_warmup_test",
+                trace_metadata={
+                    "benchmark": "cache_warmup_pattern",
+                    "request_number": i + 1,
+                },
+            )
 
-        timer.stop()
+            timer.stop()
 
-        usage = response.usage
-        cache_creation = usage.cache_creation_input_tokens
-        cache_read = usage.cache_read_input_tokens
+            usage = response.usage
+            cache_creation = usage.cache_creation_input_tokens
+            cache_read = usage.cache_read_input_tokens
 
-        result = timer.to_result(
-            cache_creation_input_tokens=cache_creation,
-            cache_read_input_tokens=cache_read,
-            cache_hit=cache_read > 0,
-        )
-        results.append(result)
+            result = timer.to_result(
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
+                cache_hit=cache_read > 0,
+            )
+            results.append(result)
 
-        status = "CREATED" if cache_creation > 0 else ("HIT" if cache_read > 0 else "NONE")
-        print(f"Request {i+1}: {result.total_latency_ms:.0f}ms | "
-              f"Cache status: {status} | "
-              f"Created: {cache_creation} | Read: {cache_read}")
+            status = "CREATED" if cache_creation > 0 else ("HIT" if cache_read > 0 else "NONE")
+            print(f"Request {i+1}: {result.total_latency_ms:.0f}ms | "
+                  f"Cache status: {status} | "
+                  f"Created: {cache_creation} | Read: {cache_read}")
 
-    return results
+        return results
+    finally:
+        # Flush Langfuse traces
+        flush_langfuse()
+        print("Langfuse traces flushed")
 
 
 class CachingBenchmarkSuite:

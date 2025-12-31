@@ -3,6 +3,8 @@ Agent topology benchmarks - Flat vs hierarchical supervisor patterns.
 
 Tests the latency implications of different agent architectures
 for multi-agent systems.
+
+All LLM calls are automatically traced to Langfuse when configured.
 """
 
 import asyncio
@@ -11,6 +13,7 @@ from typing import Any, Optional
 
 from instrumentation.timing import Timer, TimingResult
 from instrumentation.claude_sdk_client import ClaudeMaxClient
+from instrumentation.traces import flush_langfuse, get_langfuse_tracer
 from harness.runner import BenchmarkConfig, benchmark
 
 
@@ -62,6 +65,12 @@ class BaseAgent:
             prompt=prompt,
             max_tokens=500,
             system_prompt=self.system_prompt if self.system_prompt else None,
+            trace_name=f"agent_{self.name}",
+            trace_metadata={
+                "benchmark": "agent_topology",
+                "agent_name": self.name,
+                "has_context": context is not None,
+            },
         )
 
         timer.stop()

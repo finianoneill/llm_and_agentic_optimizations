@@ -1,4 +1,7 @@
-"""Benchmark API endpoints with job management."""
+"""Benchmark API endpoints with job management.
+
+All benchmark runs are traced to Langfuse when configured.
+"""
 
 import asyncio
 import json
@@ -19,6 +22,18 @@ from app.models import (
     BenchmarkInfo,
     ProgressUpdate,
 )
+
+# Import Langfuse tracing utilities
+try:
+    from instrumentation.traces import (
+        get_langfuse_tracer,
+        flush_langfuse,
+        LANGFUSE_AVAILABLE,
+    )
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+    get_langfuse_tracer = lambda: None
+    flush_langfuse = lambda: None
 
 RESULTS_DIR = Path("/app/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -176,11 +191,18 @@ def create_progress_callback(job_id: str) -> Callable:
 
 
 async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request: BenchmarkRequest):
-    """Background task to run a benchmark."""
+    """Background task to run a benchmark.
+
+    Individual LLM calls are traced to Langfuse automatically.
+    """
     job = jobs[job_id]
     job.state = JobState.RUNNING
     job.started_at = datetime.utcnow()
     job.progress.state = JobState.RUNNING
+
+    # Initialize Langfuse tracer (ensures env vars are set for individual traces)
+    if LANGFUSE_AVAILABLE:
+        get_langfuse_tracer()
 
     try:
         # Import benchmark modules
@@ -267,6 +289,11 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
         job.error = str(e)
         job.progress.state = JobState.FAILED
         job.progress.message = f"Benchmark failed: {e}"
+
+    finally:
+        # Flush Langfuse traces
+        if LANGFUSE_AVAILABLE:
+            flush_langfuse()
 
     # Broadcast final status
     await ws_manager.broadcast(job_id, job.progress.model_dump(mode="json"))

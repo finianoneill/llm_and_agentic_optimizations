@@ -1,4 +1,8 @@
-"""LLM Latency Lab API - FastAPI application."""
+"""LLM Latency Lab API - FastAPI application.
+
+This application provides an API for running LLM latency benchmarks.
+All LLM calls are traced to Langfuse when configured.
+"""
 
 import os
 from contextlib import asynccontextmanager
@@ -9,6 +13,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.models import HealthResponse
 from app.routers import benchmarks_router, results_router
 
+# Import Langfuse tracing utilities
+try:
+    from instrumentation.traces import (
+        get_langfuse_tracer,
+        flush_langfuse,
+        LANGFUSE_AVAILABLE,
+    )
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+    get_langfuse_tracer = lambda: None
+    flush_langfuse = lambda: None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,6 +33,16 @@ async def lifespan(app: FastAPI):
     print("Starting LLM Latency Lab API...")
     print(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'not set')}")
     print(f"Langfuse Host: {os.environ.get('LANGFUSE_HOST', 'not set')}")
+
+    # Initialize Langfuse tracing
+    if LANGFUSE_AVAILABLE:
+        langfuse_tracer = get_langfuse_tracer()
+        if langfuse_tracer:
+            print("Langfuse tracing initialized successfully")
+        else:
+            print("Langfuse available but not configured (missing keys)")
+    else:
+        print("Langfuse not available (package not installed)")
 
     # Verify benchmark modules are importable
     try:
@@ -29,6 +55,12 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     print("Shutting down LLM Latency Lab API...")
+
+    # Flush Langfuse traces before shutdown
+    if LANGFUSE_AVAILABLE:
+        print("Flushing Langfuse traces...")
+        flush_langfuse()
+        print("Langfuse traces flushed")
 
 
 app = FastAPI(
@@ -59,9 +91,26 @@ async def health_check():
         "api": "healthy",
     }
 
-    # Check if Langfuse is configured
-    if os.environ.get("LANGFUSE_HOST"):
-        services["langfuse"] = "configured"
+    # Check Langfuse status
+    if LANGFUSE_AVAILABLE:
+        langfuse_host = os.environ.get("LANGFUSE_HOST")
+        langfuse_public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
+        langfuse_secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
+
+        if langfuse_host and langfuse_public_key and langfuse_secret_key:
+            # Try to get the tracer to verify it's working
+            tracer = get_langfuse_tracer()
+            if tracer:
+                services["langfuse"] = "active"
+                services["langfuse_host"] = langfuse_host
+            else:
+                services["langfuse"] = "configured_but_failed"
+        elif langfuse_host:
+            services["langfuse"] = "host_configured_missing_keys"
+        else:
+            services["langfuse"] = "not_configured"
+    else:
+        services["langfuse"] = "not_installed"
 
     # Check if Claude credentials are available
     claude_config = os.path.expanduser("~/.claude")

@@ -3,6 +3,8 @@ Streaming benchmarks - TTFT vs full response comparison.
 
 Tests the impact of streaming on perceived latency by measuring
 Time to First Token (TTFT) compared to waiting for the full response.
+
+All LLM calls are automatically traced to Langfuse when configured.
 """
 
 import asyncio
@@ -10,6 +12,7 @@ from typing import Optional
 
 from instrumentation.timing import StreamingTimer, Timer, TimingResult
 from instrumentation.claude_sdk_client import ClaudeMaxClient
+from instrumentation.traces import flush_langfuse, get_langfuse_tracer
 from harness.runner import BenchmarkConfig, benchmark
 
 
@@ -32,6 +35,8 @@ async def streaming_response(config: BenchmarkConfig) -> TimingResult:
     - Total latency
     - Inter-token latency
     - Token throughput
+
+    All calls are traced to Langfuse automatically.
     """
     sdk_model = get_model_identifier(config.model)
     client = ClaudeMaxClient(model=sdk_model)
@@ -44,6 +49,11 @@ async def streaming_response(config: BenchmarkConfig) -> TimingResult:
     async for text in client.create_message_streaming(
         prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
+        trace_name="streaming_benchmark",
+        trace_metadata={
+            "benchmark": "streaming_response",
+            "config_name": config.name,
+        },
     ):
         timer.record_chunk()
         total_tokens += len(text.split())  # Approximate token count
@@ -63,6 +73,7 @@ async def non_streaming_response(config: BenchmarkConfig) -> TimingResult:
     """Benchmark non-streaming response (baseline).
 
     Measures total latency without streaming.
+    All calls are traced to Langfuse automatically.
     """
     sdk_model = get_model_identifier(config.model)
     client = ClaudeMaxClient(model=sdk_model)
@@ -74,6 +85,11 @@ async def non_streaming_response(config: BenchmarkConfig) -> TimingResult:
     response = await client.create_message(
         prompt=prompt,
         max_tokens=config.metadata.get("max_tokens", 500),
+        trace_name="non_streaming_benchmark",
+        trace_metadata={
+            "benchmark": "non_streaming_response",
+            "config_name": config.name,
+        },
     )
 
     timer.stop()
@@ -94,12 +110,18 @@ async def compare_streaming_vs_non_streaming(
     """Run a comparison between streaming and non-streaming responses.
 
     Returns a dictionary with both results for comparison.
+    All LLM calls are traced to Langfuse when configured.
     """
     from harness.runner import BenchmarkRunner
     from harness.reporter import ConsoleReporter
 
     runner = BenchmarkRunner()
     reporter = ConsoleReporter()
+
+    # Initialize Langfuse tracer (will use env vars)
+    langfuse_tracer = get_langfuse_tracer()
+    if langfuse_tracer:
+        print("Langfuse tracing enabled for streaming benchmark comparison")
 
     metadata = {"prompt": prompt, "max_tokens": max_tokens}
 
@@ -125,25 +147,30 @@ async def compare_streaming_vs_non_streaming(
         metadata=metadata,
     )
 
-    # Run benchmarks
-    streaming_result = await runner.run_benchmark(streaming_response, streaming_config)
-    non_streaming_result = await runner.run_benchmark(non_streaming_response, non_streaming_config)
+    try:
+        # Run benchmarks
+        streaming_result = await runner.run_benchmark(streaming_response, streaming_config)
+        non_streaming_result = await runner.run_benchmark(non_streaming_response, non_streaming_config)
 
-    # Print comparison
-    print(reporter.comparison_table([streaming_result, non_streaming_result]))
+        # Print comparison
+        print(reporter.comparison_table([streaming_result, non_streaming_result]))
 
-    # Calculate TTFT advantage
-    if streaming_result.stats.get("ttft_p50_ms"):
-        ttft = streaming_result.stats["ttft_p50_ms"]
-        total = non_streaming_result.stats["latency_p50_ms"]
-        perceived_improvement = ((total - ttft) / total) * 100
-        print(f"\nPerceived latency improvement from streaming: {perceived_improvement:.1f}%")
-        print(f"  User sees first content in {ttft:.0f}ms vs waiting {total:.0f}ms")
+        # Calculate TTFT advantage
+        if streaming_result.stats.get("ttft_p50_ms"):
+            ttft = streaming_result.stats["ttft_p50_ms"]
+            total = non_streaming_result.stats["latency_p50_ms"]
+            perceived_improvement = ((total - ttft) / total) * 100
+            print(f"\nPerceived latency improvement from streaming: {perceived_improvement:.1f}%")
+            print(f"  User sees first content in {ttft:.0f}ms vs waiting {total:.0f}ms")
 
-    return {
-        "streaming": streaming_result,
-        "non_streaming": non_streaming_result,
-    }
+        return {
+            "streaming": streaming_result,
+            "non_streaming": non_streaming_result,
+        }
+    finally:
+        # Flush Langfuse traces to ensure they are sent
+        flush_langfuse()
+        print("Langfuse traces flushed")
 
 
 class StreamingBenchmarkSuite:

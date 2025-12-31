@@ -6,6 +6,8 @@ for tool-using agents and batch processing.
 
 Note: Tool-based benchmarks use simulated tools. The primary focus
 is on demonstrating parallel execution patterns with the Claude API.
+
+All LLM calls are automatically traced to Langfuse when configured.
 """
 
 import asyncio
@@ -15,6 +17,7 @@ from typing import Any, Callable
 
 from instrumentation.timing import Timer, TimingResult
 from instrumentation.claude_sdk_client import ClaudeMaxClient
+from instrumentation.traces import flush_langfuse, get_langfuse_tracer
 from harness.runner import BenchmarkConfig, benchmark
 
 
@@ -275,10 +278,16 @@ async def batch_processing_comparison(
     seq_timer.start()
 
     seq_results = []
-    for prompt in prompts:
+    for i, prompt in enumerate(prompts):
         response = await client.create_message(
             prompt=prompt,
             max_tokens=200,
+            trace_name="parallelism_sequential_batch",
+            trace_metadata={
+                "benchmark": "parallelism",
+                "mode": "sequential",
+                "prompt_index": i,
+            },
         )
         seq_results.append(response)
 
@@ -293,8 +302,14 @@ async def batch_processing_comparison(
         client.create_message(
             prompt=prompt,
             max_tokens=200,
+            trace_name="parallelism_parallel_batch",
+            trace_metadata={
+                "benchmark": "parallelism",
+                "mode": "parallel",
+                "prompt_index": i,
+            },
         )
-        for prompt in prompts
+        for i, prompt in enumerate(prompts)
     ]
     par_results = await asyncio.gather(*tasks)
 
