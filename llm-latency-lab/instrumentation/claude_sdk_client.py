@@ -11,11 +11,15 @@ To use with Max account:
 2. Authenticate: claude login
 3. Use this wrapper instead of anthropic.AsyncAnthropic()
 
+For Docker deployments, set CLAUDE_PROXY_URL to point to the host proxy:
+    CLAUDE_PROXY_URL=http://host.docker.internal:8765
+
 Note: The Claude Agent SDK is designed for agentic workflows. For simple
 message completion tasks, it may have slightly different behavior than
 the direct Anthropic API.
 """
 
+import os
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -46,6 +50,9 @@ class ClaudeMaxClient:
     uses the Claude Agent SDK under the hood, which supports Max account
     authentication through Claude Code CLI.
 
+    For Docker deployments, set CLAUDE_PROXY_URL environment variable
+    to use the host proxy instead of direct SDK calls.
+
     Usage:
         client = ClaudeMaxClient()
         response = await client.create_message(
@@ -65,6 +72,7 @@ class ClaudeMaxClient:
         """
         self.model = model
         self._sdk_available = None
+        self._proxy_url = os.environ.get("CLAUDE_PROXY_URL")
 
     async def _check_sdk(self) -> bool:
         """Check if the Claude Agent SDK is available."""
@@ -79,6 +87,51 @@ class ClaudeMaxClient:
 
         return self._sdk_available
 
+    async def _create_message_via_proxy(
+        self,
+        prompt: str,
+        max_tokens: int = 1024,
+        system_prompt: str | None = None,
+        model: str | None = None,
+    ) -> Message:
+        """Create a message using the host proxy."""
+        import aiohttp
+
+        model_to_use = model or self.model
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self._proxy_url}/query",
+                json={
+                    "prompt": full_prompt,
+                    "model": model_to_use,
+                    "max_tokens": max_tokens,
+                },
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                data = await resp.json()
+
+                if "error" in data:
+                    raise Exception(data["error"])
+
+                # Parse the Claude CLI JSON response
+                result_text = data.get("result", "")
+                usage = data.get("usage", {})
+
+                return Message(
+                    content=result_text,
+                    usage=Usage(
+                        input_tokens=usage.get("input_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                        cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+                        cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+                    ),
+                    model=model_to_use,
+                )
+
     async def create_message(
         self,
         prompt: str,
@@ -87,7 +140,7 @@ class ClaudeMaxClient:
         model: str | None = None,
     ) -> Message:
         """
-        Create a message using Claude Agent SDK.
+        Create a message using Claude Agent SDK or proxy.
 
         Args:
             prompt: The user prompt
@@ -98,6 +151,15 @@ class ClaudeMaxClient:
         Returns:
             Message object with content and usage info
         """
+        # Use proxy if available (for Docker deployments)
+        if self._proxy_url:
+            return await self._create_message_via_proxy(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                model=model,
+            )
+
         from claude_agent_sdk import (
             query,
             ClaudeAgentOptions,

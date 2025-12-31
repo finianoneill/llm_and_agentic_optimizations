@@ -1,8 +1,10 @@
 """Benchmark API endpoints with job management."""
 
 import asyncio
+import json
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -18,7 +20,43 @@ from app.models import (
     ProgressUpdate,
 )
 
+RESULTS_DIR = Path("/app/results")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
 router = APIRouter(prefix="/api", tags=["benchmarks"])
+
+
+def save_result_to_file(job: JobStatus) -> str:
+    """Save job results to a JSON file. Returns the filename."""
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"{job.benchmark_type.value}_{timestamp}_{job.job_id}.json"
+    filepath = RESULTS_DIR / filename
+
+    result_data = {
+        "job_id": job.job_id,
+        "benchmark_type": job.benchmark_type.value,
+        "timestamp": timestamp,
+        "config": {
+            "model": job.request.model,
+            "runs": job.request.runs,
+            "max_tokens": job.request.max_tokens,
+            "prompt": job.request.prompt,
+        },
+        "results": job.results,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+    # Extract stats from results if available
+    if job.results and isinstance(job.results, list) and len(job.results) > 0:
+        first_result = job.results[0]
+        if isinstance(first_result, dict) and "stats" in first_result:
+            result_data["stats"] = first_result["stats"]
+
+    with open(filepath, "w") as f:
+        json.dump(result_data, f, indent=2, default=str)
+
+    return filename
 
 # In-memory job store
 jobs: dict[str, JobStatus] = {}
@@ -214,6 +252,14 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
         job.completed_at = datetime.utcnow()
         job.progress.state = JobState.COMPLETED
         job.progress.message = "Benchmark completed successfully"
+
+        # Save results to file for persistence
+        try:
+            filename = save_result_to_file(job)
+            job.result_file = filename
+            job.progress.message = f"Benchmark completed. Results saved to {filename}"
+        except Exception as save_error:
+            job.progress.message = f"Benchmark completed but failed to save: {save_error}"
 
     except Exception as e:
         job.state = JobState.FAILED

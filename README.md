@@ -170,7 +170,13 @@ Langfuse v3 Stack:
 ### Quick Start
 
 ```bash
-# From the repository root, start all services
+# 1. Start the Claude proxy on your host (required for Claude Max auth)
+cd docker/claude-proxy
+pip install -r requirements.txt
+python proxy.py &
+
+# 2. From the repository root, start all services
+cd ../..
 docker compose -f docker/docker-compose.yml up -d --build
 
 # View logs
@@ -179,6 +185,8 @@ docker compose -f docker/docker-compose.yml logs -f
 # View logs for a specific service
 docker compose -f docker/docker-compose.yml logs -f langfuse-web
 ```
+
+> **Note:** The Claude proxy runs on your host machine and provides access to Claude Max authentication via macOS Keychain. The Docker containers connect to it via `host.docker.internal:8765`.
 
 ### Access Points
 
@@ -258,6 +266,68 @@ docker compose -f docker/docker-compose.yml down
 docker compose -f docker/docker-compose.yml down -v
 ```
 
+### Claude Proxy (Required for Claude Max)
+
+The Docker containers cannot access the macOS Keychain where Claude Max credentials are stored. A lightweight proxy server bridges this gap by running on your host machine.
+
+**How it works:**
+```
+┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────┐
+│  Docker Container   │────▶│   Claude Proxy      │────▶│  Claude CLI │
+│  (llm-lab-api)      │     │   (host:8765)       │     │  (Keychain) │
+└─────────────────────┘     └─────────────────────┘     └─────────────┘
+        Calls                    Forwards to               Authenticated
+   host.docker.internal          claude CLI                via macOS
+```
+
+**Starting the proxy:**
+
+```bash
+# Terminal 1: Start the proxy (keep running)
+cd docker/claude-proxy
+pip install -r requirements.txt
+python proxy.py
+```
+
+You should see:
+```
+Starting Claude CLI Proxy on http://localhost:8765
+Container can reach this at http://host.docker.internal:8765
+```
+
+**Testing the proxy:**
+
+```bash
+# Test health endpoint
+curl http://localhost:8765/health
+
+# Test a query
+curl -X POST http://localhost:8765/query \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Say hello", "model": "haiku"}'
+```
+
+**Proxy endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/query` | POST | Send a prompt to Claude |
+| `/query/stream` | POST | Streaming response (SSE) |
+
+**Running as a background service (optional):**
+
+```bash
+# Using nohup
+nohup python docker/claude-proxy/proxy.py > /tmp/claude-proxy.log 2>&1 &
+
+# Check if running
+curl http://localhost:8765/health
+
+# Stop the proxy
+pkill -f "python.*proxy.py"
+```
+
 ### Troubleshooting
 
 **Traefik returning 404:**
@@ -267,6 +337,14 @@ docker compose -f docker/docker-compose.yml down -v
 **Langfuse not starting:**
 - Wait for PostgreSQL, ClickHouse, Redis, and MinIO to become healthy first
 - Check logs: `docker compose -f docker/docker-compose.yml logs langfuse-web`
+
+**Benchmarks failing with "Connection refused":**
+- Ensure the Claude proxy is running on the host: `curl http://localhost:8765/health`
+- Check that the container can reach the host: `docker exec llm-lab-api curl http://host.docker.internal:8765/health`
+
+**Claude proxy returning "Invalid API key":**
+- Run `claude login` on your host to authenticate
+- Verify authentication: `claude -p "test" --output-format json`
 
 ## Project Structure
 
@@ -299,9 +377,12 @@ docker compose -f docker/docker-compose.yml down -v
     ├── fastapi/
     │   ├── Dockerfile
     │   └── app/            # Benchmark API source
-    └── streamlit/
-        ├── Dockerfile
-        └── app.py          # Dashboard UI source
+    ├── streamlit/
+    │   ├── Dockerfile
+    │   └── app.py          # Dashboard UI source
+    └── claude-proxy/
+        ├── proxy.py        # Host proxy for Claude Max auth
+        └── requirements.txt
 ```
 
 ## Instrumentation

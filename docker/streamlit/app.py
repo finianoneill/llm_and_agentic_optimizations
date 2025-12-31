@@ -18,7 +18,7 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://fastapi:8000")
 
 st.set_page_config(
     page_title="LLM Latency Lab",
-    page_icon="⚡",
+    page_icon="🧪",
     layout="wide",
 )
 
@@ -53,7 +53,7 @@ def format_duration(ms: float) -> str:
 
 
 # Sidebar navigation
-st.sidebar.title("⚡ LLM Latency Lab")
+st.sidebar.title("🧪 LLM Latency Lab")
 
 page = st.sidebar.radio(
     "Navigation",
@@ -146,7 +146,7 @@ elif page == "📊 View Results":
 
     results = get_api("/api/results")
 
-    if results:
+    if results is not None:
         if not results:
             st.info("No results found. Run a benchmark to generate results.")
         else:
