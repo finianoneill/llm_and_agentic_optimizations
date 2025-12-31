@@ -135,28 +135,106 @@ from benchmarks.agent_topology import compare_topologies
 results = await compare_topologies(num_runs=3)
 ```
 
+## Docker Compose Setup
+
+A full-stack Docker application is available with a web UI, API, and observability via Langfuse.
+
+### Architecture
+
+```
+Traefik (Reverse Proxy :80)
+├── /api/*     → FastAPI (Benchmark API)
+├── /          → Streamlit (Dashboard UI)
+└── /langfuse/* → Langfuse (LLM Observability)
+                    └── PostgreSQL
+```
+
+### Prerequisites
+
+1. Ensure Claude Code CLI is installed and authenticated on your host:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   claude login
+   ```
+
+2. Docker and Docker Compose installed
+
+### Quick Start
+
+```bash
+# Navigate to docker directory
+cd docker
+
+# Copy environment file and edit as needed
+cp .env.example .env
+
+# Start all services
+docker compose up -d
+
+# View logs
+docker compose logs -f
+```
+
+### Access Points
+
+Once running, access the services at:
+- **Dashboard UI**: http://localhost/
+- **API Docs**: http://localhost/api/docs
+- **Langfuse**: http://localhost/langfuse
+- **Traefik Dashboard**: http://localhost:8080 (if enabled)
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/benchmarks` | GET | List available benchmarks |
+| `/api/benchmarks/{type}/run` | POST | Start a benchmark (returns job ID) |
+| `/api/jobs` | GET | List all jobs |
+| `/api/jobs/{job_id}` | GET | Get job status |
+| `/api/ws/{job_id}` | WS | WebSocket for real-time progress |
+| `/api/results` | GET | List saved results |
+| `/api/results/{filename}` | GET | Get specific result |
+
+### Stopping Services
+
+```bash
+cd docker
+docker compose down
+
+# To also remove volumes (database data)
+docker compose down -v
+```
+
 ## Project Structure
 
 ```
-llm-latency-lab/
-├── benchmarks/
-│   ├── streaming/          # TTFT vs full response comparison
-│   ├── caching/            # Prompt caching, semantic caching
-│   ├── parallelism/        # Parallel tool calls, async patterns
-│   ├── model_routing/      # Small model → large model routing
-│   └── agent_topology/     # Flat vs hierarchical supervisor
-├── instrumentation/
-│   ├── timing.py           # Decorators, context managers
-│   ├── traces.py           # OpenTelemetry / Langfuse integration
-│   └── claude_sdk_client.py # Claude Agent SDK wrapper for Max auth
-├── harness/
-│   ├── runner.py           # Benchmark orchestrator
-│   └── reporter.py         # Results aggregation, visualization
-├── scenarios/
-│   └── definitions.py      # Realistic task definitions
-├── results/                # Stored benchmark outputs
+.
 ├── main.py                 # CLI entry point
-└── requirements.txt
+├── requirements.txt
+├── llm-latency-lab/
+│   ├── benchmarks/
+│   │   ├── streaming/      # TTFT vs full response comparison
+│   │   ├── caching/        # Prompt caching, semantic caching
+│   │   ├── parallelism/    # Parallel tool calls, async patterns
+│   │   ├── model_routing/  # Small model → large model routing
+│   │   └── agent_topology/ # Flat vs hierarchical supervisor
+│   ├── instrumentation/
+│   │   ├── timing.py       # Decorators, context managers
+│   │   ├── traces.py       # OpenTelemetry / Langfuse integration
+│   │   └── claude_sdk_client.py
+│   ├── harness/
+│   │   ├── runner.py       # Benchmark orchestrator
+│   │   └── reporter.py     # Results aggregation, visualization
+│   ├── scenarios/
+│   │   └── definitions.py  # Realistic task definitions
+│   └── results/            # Stored benchmark outputs
+└── docker/
+    ├── docker-compose.yml
+    ├── .env.example
+    ├── traefik/            # Reverse proxy config
+    ├── fastapi/            # Benchmark API
+    └── streamlit/          # Dashboard UI
 ```
 
 ## Instrumentation

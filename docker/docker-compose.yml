@@ -1,0 +1,109 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: llm-lab-traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik:/etc/traefik:ro
+    networks:
+      - llm-lab-network
+
+  postgres:
+    image: postgres:15
+    container_name: llm-lab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-langfuse-secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - llm-lab-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  langfuse:
+    image: langfuse/langfuse:latest
+    container_name: llm-lab-langfuse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:${POSTGRES_PASSWORD:-langfuse-secret}@postgres:5432/langfuse
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-my-nextauth-secret-key}
+      NEXTAUTH_URL: http://localhost/langfuse
+      SALT: ${SALT:-my-salt-value}
+      TELEMETRY_ENABLED: "false"
+    networks:
+      - llm-lab-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.langfuse.rule=PathPrefix(`/langfuse`)"
+      - "traefik.http.routers.langfuse.entrypoints=web"
+      - "traefik.http.services.langfuse.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.langfuse-strip.stripprefix.prefixes=/langfuse"
+      - "traefik.http.routers.langfuse.middlewares=langfuse-strip"
+
+  fastapi:
+    build:
+      context: ./fastapi
+      dockerfile: Dockerfile
+    container_name: llm-lab-api
+    restart: unless-stopped
+    depends_on:
+      - langfuse
+    volumes:
+      - ~/.claude:/root/.claude:ro
+      - ../llm-latency-lab:/app/llm-latency-lab:ro
+      - results:/app/results
+    environment:
+      PYTHONPATH: /app:/app/llm-latency-lab
+      LANGFUSE_HOST: http://langfuse:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    networks:
+      - llm-lab-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+
+  streamlit:
+    build:
+      context: ./streamlit
+      dockerfile: Dockerfile
+    container_name: llm-lab-ui
+    restart: unless-stopped
+    depends_on:
+      - fastapi
+    volumes:
+      - results:/app/results:ro
+    environment:
+      API_BASE_URL: http://fastapi:8000
+    networks:
+      - llm-lab-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.ui.entrypoints=web"
+      - "traefik.http.routers.ui.priority=1"
+      - "traefik.http.services.ui.loadbalancer.server.port=8501"
+
+networks:
+  llm-lab-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  results:
