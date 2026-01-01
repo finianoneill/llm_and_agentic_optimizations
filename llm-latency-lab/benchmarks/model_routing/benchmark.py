@@ -3,6 +3,8 @@ Model routing benchmarks - Small model classifier to large model generator.
 
 Tests the latency and cost benefits of using a smaller, faster model
 to classify/route requests before invoking a larger model when needed.
+
+All LLM calls are automatically traced to Langfuse when configured.
 """
 
 import asyncio
@@ -13,6 +15,7 @@ from typing import Optional
 
 from instrumentation.timing import Timer, TimingResult
 from instrumentation.claude_sdk_client import ClaudeMaxClient
+from instrumentation.traces import flush_langfuse, get_langfuse_tracer
 from harness.runner import BenchmarkConfig, benchmark
 
 
@@ -74,6 +77,11 @@ async def classify_request(
         prompt=prompt,
         max_tokens=200,
         system_prompt=CLASSIFIER_SYSTEM_PROMPT,
+        trace_name="model_routing_classifier",
+        trace_metadata={
+            "benchmark": "model_routing",
+            "step": "classification",
+        },
     )
 
     try:

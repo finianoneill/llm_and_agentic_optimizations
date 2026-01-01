@@ -28,12 +28,15 @@ except ImportError:
 
 # Langfuse imports - optional dependency
 try:
-    from langfuse import Langfuse
-    from langfuse.decorators import observe, langfuse_context
+    from langfuse import Langfuse, observe, get_client
     LANGFUSE_AVAILABLE = True
-except ImportError:
+    print("[Langfuse] SDK imported successfully")
+except ImportError as e:
     LANGFUSE_AVAILABLE = False
     Langfuse = None
+    observe = None
+    get_client = None
+    print(f"[Langfuse] SDK import failed: {e}")
 
 
 class TracingConfig:
@@ -225,35 +228,57 @@ def asyncio_iscoroutinefunction(func: Callable) -> bool:
 
 
 class LangfuseTracer:
-    """Langfuse-specific tracer for LLM observability."""
+    """Langfuse-specific tracer for LLM observability.
+
+    Uses the new Langfuse SDK API with get_client() and context managers.
+    """
 
     def __init__(self, config: Optional[TracingConfig] = None):
         self.config = config or TracingConfig(enable_langfuse=True)
-        self._client: Optional[Langfuse] = None
         self._initialized = False
 
     def initialize(self) -> "LangfuseTracer":
-        """Initialize Langfuse client."""
+        """Initialize Langfuse client via environment variables.
+
+        The new Langfuse SDK uses environment variables for configuration:
+        - LANGFUSE_PUBLIC_KEY
+        - LANGFUSE_SECRET_KEY
+        - LANGFUSE_HOST
+        """
         if self._initialized:
             return self
 
         if not LANGFUSE_AVAILABLE:
             raise ImportError("Langfuse is not installed. Run: pip install langfuse")
 
-        if self.config.langfuse_public_key and self.config.langfuse_secret_key:
-            self._client = Langfuse(
-                public_key=self.config.langfuse_public_key,
-                secret_key=self.config.langfuse_secret_key,
-                host=self.config.langfuse_host,
-            )
+        # Set environment variables for the Langfuse SDK
+        import os
+        if self.config.langfuse_public_key:
+            os.environ["LANGFUSE_PUBLIC_KEY"] = self.config.langfuse_public_key
+        if self.config.langfuse_secret_key:
+            os.environ["LANGFUSE_SECRET_KEY"] = self.config.langfuse_secret_key
+        if self.config.langfuse_host:
+            os.environ["LANGFUSE_HOST"] = self.config.langfuse_host
+
+        # Verify we can get the client
+        try:
+            client = get_client()
+            print(f"[Langfuse] Client initialized successfully")
             self._initialized = True
+        except Exception as e:
+            print(f"[Langfuse] Failed to get client: {e}")
+            raise
 
         return self
 
     def shutdown(self) -> None:
         """Flush and shutdown Langfuse client."""
-        if self._client:
-            self._client.flush()
+        if LANGFUSE_AVAILABLE and get_client:
+            try:
+                client = get_client()
+                client.flush()
+            except Exception as e:
+                print(f"[Langfuse] Error during flush: {e}")
 
     def trace(
         self,
@@ -262,25 +287,40 @@ class LangfuseTracer:
         session_id: Optional[str] = None,
         metadata: Optional[dict] = None,
     ):
-        """Create a Langfuse trace.
+        """Create a Langfuse trace using the new API.
 
-        Usage:
-            trace = tracer.trace("benchmark_run", user_id="test")
-            # ... do work
-            trace.update(output={"result": "success"})
+        Returns a trace object that can be used as a context manager or
+        have observations added to it.
         """
         if not self._initialized:
             self.initialize()
 
-        if not self._client:
+        if not LANGFUSE_AVAILABLE or not get_client:
+            print(f"[Langfuse] Cannot create trace '{name}' - SDK not available")
             return None
 
-        return self._client.trace(
-            name=name,
-            user_id=user_id,
-            session_id=session_id,
-            metadata=metadata,
-        )
+        try:
+            client = get_client()
+            # Include user_id and session_id in metadata if provided
+            full_metadata = metadata or {}
+            if user_id:
+                full_metadata["user_id"] = user_id
+            if session_id:
+                full_metadata["session_id"] = session_id
+
+            # Use the context manager to create a span/trace
+            trace_obj = client.start_as_current_observation(
+                name=name,
+                as_type="span",
+                metadata=full_metadata if full_metadata else None,
+            )
+            print(f"[Langfuse] Trace/span created: {name}")
+            return trace_obj
+        except Exception as e:
+            print(f"[Langfuse] Error creating trace '{name}': {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def generation(
         self,
@@ -292,29 +332,32 @@ class LangfuseTracer:
         usage: Optional[dict] = None,
         metadata: Optional[dict] = None,
     ):
-        """Record an LLM generation within a trace.
+        """Record an LLM generation.
 
-        Usage:
-            gen = tracer.generation(
-                trace,
-                name="chat_completion",
-                model="claude-3-sonnet",
-                input_data={"messages": [...]},
-                output_data=response.content,
-                usage={"input_tokens": 100, "output_tokens": 50}
-            )
+        With the new API, this creates a generation observation.
         """
-        if not trace:
+        if not LANGFUSE_AVAILABLE or not get_client:
             return None
 
-        return trace.generation(
-            name=name,
-            model=model,
-            input=input_data,
-            output=output_data,
-            usage=usage,
-            metadata=metadata,
-        )
+        try:
+            client = get_client()
+            with client.start_as_current_observation(
+                name=name,
+                as_type="generation",
+                model=model,
+            ) as gen:
+                # Update with input, output, usage, and metadata
+                gen.update(
+                    input=input_data,
+                    output=output_data,
+                    usage=usage,
+                    metadata=metadata,
+                )
+            print(f"[Langfuse] Generation recorded: {name}")
+            return gen
+        except Exception as e:
+            print(f"[Langfuse] Error creating generation '{name}': {e}")
+            return None
 
 
 # Global tracer instance
@@ -341,3 +384,105 @@ def shutdown_tracing() -> None:
     if _global_tracer:
         _global_tracer.shutdown()
         _global_tracer = None
+
+
+# Global LangfuseTracer instance for simplified access
+_global_langfuse_tracer: Optional[LangfuseTracer] = None
+
+
+def get_langfuse_tracer(config: Optional[TracingConfig] = None) -> Optional[LangfuseTracer]:
+    """Get or create the global LangfuseTracer instance.
+
+    Returns None if Langfuse is not available or not configured.
+    """
+    global _global_langfuse_tracer
+
+    if not LANGFUSE_AVAILABLE:
+        print("[Langfuse] SDK not available (not installed)")
+        return None
+
+    if _global_langfuse_tracer is None:
+        tracer_config = config or TracingConfig(enable_langfuse=True)
+
+        # Debug: Print configuration
+        public_key = tracer_config.langfuse_public_key
+        secret_key = tracer_config.langfuse_secret_key
+        host = tracer_config.langfuse_host
+
+        print(f"[Langfuse] Attempting initialization...")
+        print(f"[Langfuse] Host: {host}")
+        print(f"[Langfuse] Public key: {public_key[:20] + '...' if public_key else 'NOT SET'}")
+        print(f"[Langfuse] Secret key: {'SET' if secret_key else 'NOT SET'}")
+
+        if public_key and secret_key:
+            _global_langfuse_tracer = LangfuseTracer(tracer_config)
+            try:
+                _global_langfuse_tracer.initialize()
+                print(f"[Langfuse] Successfully initialized!")
+            except Exception as e:
+                print(f"[Langfuse] Failed to initialize: {e}")
+                import traceback
+                traceback.print_exc()
+                _global_langfuse_tracer = None
+        else:
+            print("[Langfuse] Missing public or secret key - skipping initialization")
+
+    return _global_langfuse_tracer
+
+
+def flush_langfuse() -> None:
+    """Flush any pending Langfuse events."""
+    global _global_langfuse_tracer
+    print("[Langfuse] Flushing traces...")
+
+    if _global_langfuse_tracer:
+        try:
+            _global_langfuse_tracer.shutdown()
+            print("[Langfuse] Tracer shutdown complete")
+        except Exception as e:
+            print(f"[Langfuse] Error during tracer shutdown: {e}")
+
+
+def get_observe_decorator():
+    """Get the Langfuse @observe decorator if available.
+
+    Returns a no-op decorator if Langfuse is not available.
+
+    Usage:
+        observe = get_observe_decorator()
+
+        @observe(name="my_function")
+        async def my_function():
+            ...
+    """
+    if LANGFUSE_AVAILABLE and observe:
+        return observe
+
+    # Return a no-op decorator
+    def noop_decorator(*args, **kwargs):
+        def wrapper(func):
+            return func
+        # Handle both @observe and @observe() syntax
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return wrapper
+
+    return noop_decorator
+
+
+# Export key items for easy importing
+__all__ = [
+    "TracingConfig",
+    "Tracer",
+    "LangfuseTracer",
+    "get_tracer",
+    "init_tracing",
+    "shutdown_tracing",
+    "get_langfuse_tracer",
+    "flush_langfuse",
+    "get_observe_decorator",
+    "LANGFUSE_AVAILABLE",
+    "OTEL_AVAILABLE",
+    "observe",
+    "get_client",
+]

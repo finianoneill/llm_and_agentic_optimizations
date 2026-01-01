@@ -222,7 +222,7 @@ services:
       langfuse-web:
         condition: service_started
     volumes:
-      - ~/.claude:/root/.claude:ro
+      - ~/.claude:/root/.claude
       - ../llm-latency-lab:/app/llm-latency-lab:ro
       - results:/app/results
     environment:
@@ -230,6 +230,7 @@ services:
       LANGFUSE_HOST: http://langfuse-web:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      CLAUDE_PROXY_URL: http://host.docker.internal:8765
     networks:
       - llm-lab-network
     labels:
