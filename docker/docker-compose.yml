@@ -34,6 +34,24 @@ services:
       timeout: 5s
       retries: 5
 
+  app-postgres:
+    image: postgres:15
+    container_name: llm-lab-app-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: llm_lab
+      POSTGRES_USER: llm_lab
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:-llm-lab-secret}
+    volumes:
+      - app_postgres_data:/var/lib/postgresql/data
+    networks:
+      - llm-lab-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llm_lab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   redis:
     image: redis:7
     container_name: llm-lab-redis
@@ -221,6 +239,8 @@ services:
     depends_on:
       langfuse-web:
         condition: service_started
+      app-postgres:
+        condition: service_healthy
     volumes:
       - ~/.claude:/root/.claude
       - ../llm-latency-lab:/app/llm-latency-lab:ro
@@ -231,6 +251,7 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       CLAUDE_PROXY_URL: http://host.docker.internal:8765
+      DATABASE_URL: postgresql://llm_lab:${APP_DB_PASSWORD:-llm-lab-secret}@app-postgres:5432/llm_lab
     networks:
       - llm-lab-network
     labels:
@@ -267,6 +288,7 @@ networks:
 
 volumes:
   postgres_data:
+  app_postgres_data:
   redis_data:
   clickhouse_data:
   clickhouse_logs:

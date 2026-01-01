@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.models import HealthResponse
 from app.routers import benchmarks_router, results_router
+from app.db.session import init_db, check_db_connection
 
 # Import Langfuse tracing utilities
 try:
@@ -33,6 +34,18 @@ async def lifespan(app: FastAPI):
     print("Starting LLM Latency Lab API...")
     print(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'not set')}")
     print(f"Langfuse Host: {os.environ.get('LANGFUSE_HOST', 'not set')}")
+    print(f"Database URL: {os.environ.get('DATABASE_URL', 'not set')}")
+
+    # Initialize database
+    try:
+        print("Initializing database...")
+        init_db()
+        if check_db_connection():
+            print("Database connection verified")
+        else:
+            print("WARNING: Database connection check failed")
+    except Exception as e:
+        print(f"ERROR: Failed to initialize database: {e}")
 
     # Initialize Langfuse tracing
     if LANGFUSE_AVAILABLE:
@@ -90,6 +103,12 @@ async def health_check():
     services = {
         "api": "healthy",
     }
+
+    # Check database status
+    if check_db_connection():
+        services["database"] = "healthy"
+    else:
+        services["database"] = "unhealthy"
 
     # Check Langfuse status
     if LANGFUSE_AVAILABLE:
