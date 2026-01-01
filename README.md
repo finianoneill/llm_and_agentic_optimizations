@@ -1,10 +1,17 @@
 # LLM Latency Lab
 
-A comprehensive benchmark suite for testing and demonstrating various optimizations to improve LLM and agentic system latency.
+A comprehensive benchmark suite for testing and demonstrating various optimizations to improve LLM and agentic system latency, with built-in observability via **Langfuse**.
 
 ## Overview
 
 This project provides tools and benchmarks for measuring the impact of common latency optimization techniques when working with Large Language Models, specifically the Anthropic Claude API.
+
+### Key Features
+
+- **Latency Benchmarks**: Streaming, caching, parallelism, model routing, and agent topology
+- **Langfuse Integration**: Automatic tracing of all LLM calls with token usage, latency metrics, and cost tracking
+- **Claude Max Support**: Uses Claude Agent SDK with consumer subscription authentication
+- **Docker Stack**: Full-stack deployment with self-hosted Langfuse v3 for complete observability
 
 ## Installation
 
@@ -43,11 +50,14 @@ python main.py caching --runs 10 --model claude-sonnet-4-20250514
 
 ## Benchmark Categories
 
+All benchmarks automatically trace LLM calls to Langfuse when configured, capturing token usage, latency metrics, and cost data.
+
 ### 1. Streaming (`benchmarks/streaming/`)
 
 Compares streaming vs non-streaming responses:
 - **TTFT (Time to First Token)**: How quickly users see initial content
 - **Perceived latency**: Up to 60-80% improvement with streaming
+- **Langfuse Traces**: Captures TTFT, total latency, and chunk timing
 
 **CLI Command:**
 ```bash
@@ -69,6 +79,7 @@ Tests Anthropic's `cache_control` feature:
 - **Cache warm-up patterns**: First request creates cache, subsequent requests hit it
 - **Latency reduction**: Up to 85% on cache hits
 - **Cost reduction**: Cached tokens at 10% of regular rate
+- **Langfuse Traces**: Tracks cache creation and read token counts
 
 **CLI Command:**
 ```bash
@@ -137,7 +148,18 @@ results = await compare_topologies(num_runs=3)
 
 ## Docker Compose Setup
 
-A full-stack Docker application is available with a web UI, API, and LLM observability via self-hosted Langfuse v3.
+A full-stack Docker application is available with a web UI, API, and **complete LLM observability via self-hosted Langfuse v3**.
+
+### Langfuse Observability
+
+The Docker stack includes a fully self-hosted Langfuse v3 installation for LLM observability:
+
+- **Trace Dashboard**: View all LLM calls with latency, tokens, and costs
+- **Session Tracking**: Group related benchmark runs into sessions
+- **Prompt Management**: Compare prompt variations and their performance
+- **Analytics**: Aggregate metrics across benchmark runs
+
+Access the Langfuse console at `http://langfuse.localhost` after starting the stack.
 
 ### Architecture
 
@@ -229,11 +251,21 @@ LANGFUSE_PUBLIC_KEY=pk-...
 LANGFUSE_SECRET_KEY=sk-...
 ```
 
+#### Setting Up Langfuse API Keys
+
+1. Start the Docker stack: `docker compose -f docker/docker-compose.yml up -d`
+2. Navigate to `http://langfuse.localhost` and create an account
+3. Create a new project and generate API keys (Settings → API Keys)
+4. Add the keys to your `docker/.env` file
+5. Restart the API container: `docker compose -f docker/docker-compose.yml restart llm-lab-api`
+
+Once configured, all benchmark LLM calls will appear in your Langfuse dashboard with full tracing.
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/health` | GET | Health check |
+| `/api/health` | GET | Health check (includes Langfuse status) |
 | `/api/benchmarks` | GET | List available benchmarks |
 | `/api/benchmarks/{type}/run` | POST | Start a benchmark (returns job ID) |
 | `/api/jobs` | GET | List all jobs |
@@ -346,6 +378,11 @@ pkill -f "python.*proxy.py"
 - Run `claude login` on your host to authenticate
 - Verify authentication: `claude -p "test" --output-format json`
 
+**Langfuse traces not appearing:**
+- Check API keys are set: `docker exec llm-lab-api env | grep LANGFUSE`
+- Verify Langfuse is healthy: `curl http://langfuse.localhost/api/public/health`
+- Check API logs for tracing errors: `docker compose -f docker/docker-compose.yml logs llm-lab-api | grep Langfuse`
+
 ## Project Structure
 
 ```
@@ -360,9 +397,9 @@ pkill -f "python.*proxy.py"
 │   │   ├── model_routing/  # Small model → large model routing
 │   │   └── agent_topology/ # Flat vs hierarchical supervisor
 │   ├── instrumentation/
-│   │   ├── timing.py       # Decorators, context managers
-│   │   ├── traces.py       # OpenTelemetry / Langfuse integration
-│   │   └── claude_sdk_client.py
+│   │   ├── timing.py       # Timer utilities for latency measurement
+│   │   ├── traces.py       # Langfuse tracing and @observe decorator
+│   │   └── claude_sdk_client.py  # Claude client with auto-tracing
 │   ├── harness/
 │   │   ├── runner.py       # Benchmark orchestrator
 │   │   └── reporter.py     # Results aggregation, visualization
@@ -387,35 +424,88 @@ pkill -f "python.*proxy.py"
 
 ## Instrumentation
 
+### Langfuse LLM Observability
+
+All LLM calls in the benchmark suite are **automatically traced to Langfuse** when configured. This provides:
+
+- **Token Usage Tracking**: Input, output, and cached token counts per call
+- **Latency Metrics**: Total latency, time-to-first-token (TTFT) for streaming
+- **Cost Tracking**: Automatic cost calculation based on token usage
+- **Trace Hierarchy**: Nested spans for complex benchmark operations
+
+#### Configuration
+
+Set these environment variables to enable Langfuse tracing:
+
+```bash
+export LANGFUSE_HOST=http://langfuse.localhost  # Or https://cloud.langfuse.com
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+#### Automatic Tracing
+
+The `ClaudeMaxClient` automatically traces all LLM calls:
+
+```python
+from instrumentation.claude_sdk_client import ClaudeMaxClient
+
+client = ClaudeMaxClient(model="sonnet")
+
+# This call is automatically traced to Langfuse
+response = await client.create_message(
+    prompt="Explain quantum computing",
+    trace_name="my_operation",  # Optional: custom trace name
+    trace_metadata={"benchmark": "streaming"},  # Optional: custom metadata
+)
+```
+
+#### Using the @observe Decorator
+
+For custom functions, use the Langfuse `@observe` decorator:
+
+```python
+from instrumentation.traces import get_observe_decorator
+
+observe = get_observe_decorator()
+
+@observe(name="my_benchmark_function")
+async def run_benchmark():
+    # All LLM calls within are nested under this trace
+    ...
+```
+
 ### Timing Utilities
 
 ```python
-from instrumentation.timing import timed, async_timed, Timer, StreamingTimer
+from instrumentation.timing import Timer, StreamingTimer
 
-# Context manager
-async with async_timed("my_operation") as timer:
-    await do_something()
+# For non-streaming operations
+timer = Timer("my_operation")
+timer.start()
+result = await do_something()
+timer.stop()
 print(f"Elapsed: {timer.elapsed_ms}ms")
 
-# For streaming responses
+# For streaming responses with TTFT tracking
 timer = StreamingTimer("streaming")
 timer.start()
 async for chunk in stream:
     timer.record_chunk()
 timer.stop()
-print(f"TTFT: {timer.ttft_ms}ms")
+print(f"TTFT: {timer.ttft_ms}ms, Total: {timer.elapsed_ms}ms")
 ```
 
-### Tracing Integration
+### OpenTelemetry Integration
+
+For additional distributed tracing beyond Langfuse:
 
 ```python
 from instrumentation.traces import init_tracing, TracingConfig
 
-# Enable OpenTelemetry tracing
 config = TracingConfig(
     service_name="my-benchmark",
     enable_console_export=True,
-    enable_langfuse=False,
 )
 init_tracing(config)
 ```
