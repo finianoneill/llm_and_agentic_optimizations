@@ -153,7 +153,8 @@ elif page == "📊 View Results":
             # Results table
             df = pd.DataFrame([
                 {
-                    "Filename": r["filename"],
+                    "Job ID": r["job_id"],
+                    "Result": r["result_name"],
                     "Benchmark": r["benchmark_type"],
                     "Model": r["model"],
                     "Created": r["created_at"],
@@ -166,15 +167,17 @@ elif page == "📊 View Results":
 
             st.dataframe(df, use_container_width=True)
 
-            # Result details
+            # Result details - get unique job IDs
             st.subheader("Result Details")
-            selected_file = st.selectbox(
-                "Select a result to view details",
-                options=[r["filename"] for r in results],
+            job_ids = list(dict.fromkeys([r["job_id"] for r in results]))  # Unique, preserve order
+            selected_job_id = st.selectbox(
+                "Select a job to view details",
+                options=job_ids,
+                format_func=lambda x: f"{x} - {next((r['benchmark_type'] for r in results if r['job_id'] == x), 'unknown')}",
             )
 
-            if selected_file:
-                result_data = get_api(f"/api/results/{selected_file}")
+            if selected_job_id:
+                result_data = get_api(f"/api/results/{selected_job_id}")
 
                 if result_data:
                     col1, col2 = st.columns(2)
@@ -183,32 +186,41 @@ elif page == "📊 View Results":
                         st.json(result_data.get("config", {}))
 
                     with col2:
-                        stats = result_data.get("stats", {})
-                        if stats:
-                            # Create latency chart
-                            latency_data = {
-                                "Percentile": ["p50", "p95", "p99"],
-                                "Latency (ms)": [
-                                    stats.get("latency_p50_ms", 0),
-                                    stats.get("latency_p95_ms", 0),
-                                    stats.get("latency_p99_ms", 0),
-                                ],
-                            }
-                            fig = px.bar(
-                                latency_data,
-                                x="Percentile",
-                                y="Latency (ms)",
-                                title="Latency Distribution",
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
+                        # Get stats from first result if available
+                        result_list = result_data.get("results", [])
+                        if result_list:
+                            stats = result_list[0].get("stats", {})
+                            if stats:
+                                # Create latency chart
+                                latency_data = {
+                                    "Percentile": ["p50", "p95", "p99"],
+                                    "Latency (ms)": [
+                                        stats.get("latency_p50_ms", 0),
+                                        stats.get("latency_p95_ms", 0),
+                                        stats.get("latency_p99_ms", 0),
+                                    ],
+                                }
+                                fig = px.bar(
+                                    latency_data,
+                                    x="Percentile",
+                                    y="Latency (ms)",
+                                    title="Latency Distribution",
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
 
-                    # Download button
-                    st.download_button(
-                        "📥 Download JSON",
-                        data=json.dumps(result_data, indent=2),
-                        file_name=selected_file,
-                        mime="application/json",
-                    )
+                    # Download buttons
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            "📥 Download JSON",
+                            data=json.dumps(result_data, indent=2),
+                            file_name=f"{result_data.get('benchmark_type', 'result')}_{selected_job_id}.json",
+                            mime="application/json",
+                        )
+                    with col2:
+                        # CSV export link
+                        csv_url = f"{API_BASE_URL}/api/results/{selected_job_id}/export"
+                        st.markdown(f"[📥 Download CSV]({csv_url})")
     else:
         st.error("Could not fetch results from API.")
 
@@ -295,7 +307,7 @@ elif page == "❤️ Health":
         st.subheader("Services")
         services = health.get("services", {})
         for service, status in services.items():
-            icon = "🟢" if status in ["healthy", "available", "configured"] else "🔴"
+            icon = "🟢" if status in ["healthy", "available", "configured", "active"] else "🔴"
             st.markdown(f"- **{service}:** {icon} {status}")
 
         st.subheader("Configuration")

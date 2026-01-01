@@ -156,9 +156,10 @@ class BenchmarkInfo(BaseModel):
 
 
 class ResultSummary(BaseModel):
-    """Summary of a saved result file."""
+    """Summary of a benchmark result."""
 
-    filename: str
+    job_id: str
+    result_name: str
     benchmark_type: str
     model: str
     created_at: datetime

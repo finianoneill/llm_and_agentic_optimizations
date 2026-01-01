@@ -20,7 +20,8 @@ def result_to_summary(result, job) -> ResultSummary:
     """Convert database result to ResultSummary."""
     stats_data = result.stats or {}
     return ResultSummary(
-        filename=f"{job.benchmark_type}_{result.name}_{job.id}",
+        job_id=job.id,
+        result_name=result.name,
         benchmark_type=job.benchmark_type,
         model=job.model,
         created_at=result.created_at or job.created_at,
