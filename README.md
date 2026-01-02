@@ -12,6 +12,7 @@ This project provides tools and benchmarks for measuring the impact of common la
 - **Langfuse Integration**: Automatic tracing of all LLM calls with token usage, latency metrics, and cost tracking
 - **Claude Max Support**: Uses Claude Agent SDK with consumer subscription authentication
 - **Docker Stack**: Full-stack deployment with self-hosted Langfuse v3 for complete observability
+- **PostgreSQL App Database**: Persistent storage for benchmark jobs, results, and timing data with Alembic migrations
 
 ## Installation
 
@@ -170,10 +171,14 @@ Traefik v3.6 (Reverse Proxy :80)
 ├── langfuse.localhost → Langfuse Web (LLM Observability)
 └── traefik.localhost  → Traefik Dashboard
 
+Application Stack:
+├── app-postgres       → Benchmark jobs, results & timing data (PostgreSQL 15)
+└── FastAPI            → Benchmark API with SQLAlchemy ORM
+
 Langfuse v3 Stack:
 ├── langfuse-web       → Web UI & API
 ├── langfuse-worker    → Background job processing
-├── PostgreSQL         → Primary database
+├── PostgreSQL         → Langfuse database (separate from app DB)
 ├── ClickHouse         → Analytics/traces storage
 ├── Redis              → Cache & queue
 └── MinIO              → S3-compatible object storage
@@ -228,7 +233,10 @@ Once running, access the services at:
 Create a `docker/.env` file to customize secrets (recommended for production):
 
 ```bash
-# PostgreSQL
+# Application Database (benchmark data)
+APP_DB_PASSWORD=your-app-db-password
+
+# Langfuse PostgreSQL
 POSTGRES_PASSWORD=your-secure-password
 
 # ClickHouse
@@ -271,8 +279,10 @@ Once configured, all benchmark LLM calls will appear in your Langfuse dashboard 
 | `/api/jobs` | GET | List all jobs |
 | `/api/jobs/{job_id}` | GET | Get job status |
 | `/api/ws/{job_id}` | WS | WebSocket for real-time progress |
-| `/api/results` | GET | List saved results |
-| `/api/results/{filename}` | GET | Get specific result |
+| `/api/results` | GET | List saved results (from database) |
+| `/api/results/{job_id}` | GET | Get results for a specific job |
+| `/api/results/{job_id}/csv` | GET | Export job timing data as CSV |
+| `/api/results/export/csv` | GET | Export all timing data as CSV |
 
 ### Services
 
@@ -281,9 +291,10 @@ Once configured, all benchmark LLM calls will appear in your Langfuse dashboard 
 | llm-lab-traefik | traefik:v3.6 | Reverse proxy & routing |
 | llm-lab-ui | docker-streamlit | Dashboard UI |
 | llm-lab-api | docker-fastapi | Benchmark API |
+| llm-lab-app-db | postgres:15 | Application database (jobs, results, timing) |
 | llm-lab-langfuse-web | langfuse/langfuse:3 | Langfuse web interface |
 | llm-lab-langfuse-worker | langfuse/langfuse-worker:3 | Background processing |
-| llm-lab-postgres | postgres:15 | Primary database |
+| llm-lab-postgres | postgres:15 | Langfuse database |
 | llm-lab-clickhouse | clickhouse/clickhouse-server:24.3 | Analytics database |
 | llm-lab-redis | redis:7 | Cache & queue |
 | llm-lab-minio | minio/minio:latest | Object storage |
@@ -296,6 +307,71 @@ docker compose -f docker/docker-compose.yml down
 
 # Stop and remove volumes (deletes all data)
 docker compose -f docker/docker-compose.yml down -v
+```
+
+### Application Database
+
+The application uses a dedicated PostgreSQL database (`llm-lab-app-db`) separate from Langfuse's database. This stores all benchmark jobs, results, and individual timing measurements.
+
+#### Database Schema
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ jobs                                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ id (PK)           │ benchmark_type │ state    │ model      │ runs          │
+│ max_tokens        │ prompt         │ quick    │ created_at │ started_at    │
+│ completed_at      │ error          │          │            │               │
+└─────────────────────────────────────────────────────────────────────────────┘
+        │
+        │ 1:N
+        ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ benchmark_results                                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ id (PK)           │ job_id (FK)    │ name     │ description │ success_rate │
+│ stats (JSON)      │ start_time     │ end_time │ errors      │ created_at   │
+└─────────────────────────────────────────────────────────────────────────────┘
+        │
+        │ 1:N
+        ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ timing_results                                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ id (PK)           │ benchmark_result_id (FK) │ name           │             │
+│ total_latency_ms  │ ttft_ms                  │ input_tokens   │             │
+│ output_tokens     │ tokens_per_second        │ cache_hit      │             │
+│ cache_hit_rate    │ created_at               │                │             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Alembic Migrations
+
+The database schema is managed with Alembic. Migrations run automatically when the FastAPI container starts.
+
+```bash
+# View migration history
+docker exec llm-lab-api alembic history
+
+# Create a new migration (after modifying models)
+docker exec llm-lab-api alembic revision --autogenerate -m "description"
+
+# Apply pending migrations manually
+docker exec llm-lab-api alembic upgrade head
+
+# Rollback one migration
+docker exec llm-lab-api alembic downgrade -1
+```
+
+#### Accessing the Database
+
+```bash
+# Connect to the app database
+docker exec -it llm-lab-app-db psql -U llm_lab -d llm_lab
+
+# Example queries
+SELECT * FROM jobs ORDER BY created_at DESC LIMIT 10;
+SELECT COUNT(*) FROM timing_results;
 ```
 
 ### Claude Proxy (Required for Claude Max)
@@ -383,6 +459,16 @@ pkill -f "python.*proxy.py"
 - Verify Langfuse is healthy: `curl http://langfuse.localhost/api/public/health`
 - Check API logs for tracing errors: `docker compose -f docker/docker-compose.yml logs llm-lab-api | grep Langfuse`
 
+**App database connection issues:**
+- Check database is healthy: `docker exec llm-lab-app-db pg_isready -U llm_lab`
+- Verify DATABASE_URL: `docker exec llm-lab-api env | grep DATABASE_URL`
+- Check migration status: `docker exec llm-lab-api alembic current`
+- View database logs: `docker compose -f docker/docker-compose.yml logs llm-lab-app-db`
+
+**Missing benchmark results:**
+- Ensure the app-postgres container is running: `docker ps | grep llm-lab-app-db`
+- Check for migration errors in API logs: `docker compose -f docker/docker-compose.yml logs llm-lab-api | grep -i alembic`
+
 ## Project Structure
 
 ```
@@ -413,7 +499,17 @@ pkill -f "python.*proxy.py"
     │   └── traefik.yml     # Traefik static config
     ├── fastapi/
     │   ├── Dockerfile
-    │   └── app/            # Benchmark API source
+    │   ├── alembic.ini     # Alembic configuration
+    │   ├── alembic/        # Database migrations
+    │   │   ├── env.py
+    │   │   └── versions/   # Migration scripts
+    │   └── app/
+    │       ├── main.py     # FastAPI application
+    │       ├── db/         # Database layer
+    │       │   ├── models.py   # SQLAlchemy ORM models
+    │       │   ├── crud.py     # CRUD operations
+    │       │   └── session.py  # Database session management
+    │       └── routers/    # API route handlers
     ├── streamlit/
     │   ├── Dockerfile
     │   └── app.py          # Dashboard UI source
