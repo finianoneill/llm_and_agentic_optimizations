@@ -7,7 +7,7 @@ Jobs are persisted to PostgreSQL database.
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
@@ -183,34 +183,147 @@ def save_results_to_db(job_id: str, results: list, db: Session):
 def flatten_benchmark_results(results: dict, benchmark_type: str) -> list[dict]:
     """Transform nested benchmark results into a flat list for database storage.
 
-    Non-streaming benchmarks return nested dicts like:
-        {"warmup": [...], "comparison": {...}}
+    Handles various result structures from different benchmarks:
+    - BenchmarkResult objects: Extract .stats attribute (matches StatsSchema)
+    - Lists of TimingResult: Aggregate into stats format
+    - Nested dicts: Recursively flatten with prefixed names
+    - Plain dicts: Store as-is for custom metrics
 
-    This function flattens them into:
-        [{"name": "caching_warmup", "stats": {...}}, {"name": "caching_comparison", "stats": {...}}]
+    Returns list of {"name": "...", "stats": {...}, "description": "..."} dicts.
     """
     flattened = []
 
-    def extract_stats(value) -> dict:
-        """Extract stats dict from various result types."""
-        if isinstance(value, dict):
-            return value
-        elif hasattr(value, "model_dump"):
-            return value.model_dump()
-        elif hasattr(value, "__dict__"):
-            return vars(value)
-        elif isinstance(value, list):
-            # For lists of results, summarize them
-            return {"results": [extract_stats(v) for v in value]}
-        else:
-            return {"value": value}
+    def aggregate_timing_results(timing_list: list) -> dict:
+        """Aggregate a list of TimingResult objects into stats format."""
+        if not timing_list:
+            return {}
 
+        latencies = []
+        ttfts = []
+        tokens_per_sec = []
+        cache_hits = []
+
+        for tr in timing_list:
+            # Handle both TimingResult objects and dicts
+            if hasattr(tr, "total_latency_ms"):
+                latencies.append(tr.total_latency_ms)
+                if tr.ttft_ms is not None:
+                    ttfts.append(tr.ttft_ms)
+                tokens_per_sec.append(tr.tokens_per_second)
+                cache_hits.append(tr.cache_hit_rate if hasattr(tr, "cache_hit_rate") else 0)
+            elif isinstance(tr, dict):
+                if "total_latency_ms" in tr:
+                    latencies.append(tr["total_latency_ms"])
+                if tr.get("ttft_ms") is not None:
+                    ttfts.append(tr["ttft_ms"])
+                if "tokens_per_second" in tr:
+                    tokens_per_sec.append(tr["tokens_per_second"])
+
+        def percentile(values: list, p: float) -> float:
+            if not values:
+                return 0.0
+            sorted_vals = sorted(values)
+            k = (len(sorted_vals) - 1) * (p / 100)
+            f = int(k)
+            c = min(f + 1, len(sorted_vals) - 1)
+            return sorted_vals[f] + (k - f) * (sorted_vals[c] - sorted_vals[f])
+
+        return {
+            "count": len(timing_list),
+            "latency_p50_ms": percentile(latencies, 50),
+            "latency_p95_ms": percentile(latencies, 95),
+            "latency_p99_ms": percentile(latencies, 99),
+            "latency_mean_ms": sum(latencies) / len(latencies) if latencies else 0,
+            "latency_min_ms": min(latencies) if latencies else 0,
+            "latency_max_ms": max(latencies) if latencies else 0,
+            "ttft_p50_ms": percentile(ttfts, 50) if ttfts else None,
+            "ttft_p95_ms": percentile(ttfts, 95) if ttfts else None,
+            "ttft_p99_ms": percentile(ttfts, 99) if ttfts else None,
+            "avg_tokens_per_second": sum(tokens_per_sec) / len(tokens_per_sec) if tokens_per_sec else 0,
+            "avg_cache_hit_rate": sum(cache_hits) / len(cache_hits) if cache_hits else 0,
+        }
+
+    def is_benchmark_result(obj) -> bool:
+        """Check if object is a BenchmarkResult (has stats dict attribute)."""
+        return hasattr(obj, "stats") and isinstance(getattr(obj, "stats"), dict)
+
+    def is_timing_result_list(obj) -> bool:
+        """Check if object is a list of TimingResult objects."""
+        if not isinstance(obj, list) or not obj:
+            return False
+        first = obj[0]
+        return hasattr(first, "total_latency_ms") or (
+            isinstance(first, dict) and "total_latency_ms" in first
+        )
+
+    def process_value(key: str, value: Any, prefix: str) -> None:
+        """Recursively process a value and add results to flattened list."""
+        full_name = f"{prefix}_{key}" if prefix else key
+
+        # Case 1: BenchmarkResult object - extract its stats
+        if is_benchmark_result(value):
+            flattened.append({
+                "name": full_name,
+                "stats": value.stats,  # Already in correct format
+                "description": f"{benchmark_type} benchmark: {key}",
+            })
+
+        # Case 2: List of TimingResult objects - aggregate into stats
+        elif is_timing_result_list(value):
+            flattened.append({
+                "name": full_name,
+                "stats": aggregate_timing_results(value),
+                "description": f"{benchmark_type} benchmark: {key}",
+            })
+
+        # Case 3: Nested dict that might contain BenchmarkResults
+        elif isinstance(value, dict):
+            # Check if any values are BenchmarkResult or TimingResult lists
+            has_complex_values = any(
+                is_benchmark_result(v) or is_timing_result_list(v)
+                for v in value.values()
+            )
+
+            if has_complex_values:
+                # Recurse into nested structure
+                for k, v in value.items():
+                    process_value(k, v, full_name)
+            else:
+                # Plain dict with metrics - store as-is
+                flattened.append({
+                    "name": full_name,
+                    "stats": value,
+                    "description": f"{benchmark_type} benchmark: {key}",
+                })
+
+        # Case 4: List of dicts (like timing_results from to_dict)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            # Check if these look like timing results
+            if "total_latency_ms" in value[0]:
+                flattened.append({
+                    "name": full_name,
+                    "stats": aggregate_timing_results(value),
+                    "description": f"{benchmark_type} benchmark: {key}",
+                })
+            else:
+                # Store as summary
+                flattened.append({
+                    "name": full_name,
+                    "stats": {"count": len(value), "items": value},
+                    "description": f"{benchmark_type} benchmark: {key}",
+                })
+
+        # Case 5: Other values - wrap in stats dict
+        else:
+            flattened.append({
+                "name": full_name,
+                "stats": {"value": value} if not isinstance(value, dict) else value,
+                "description": f"{benchmark_type} benchmark: {key}",
+            })
+
+    # Process each top-level key
     for key, value in results.items():
-        flattened.append({
-            "name": f"{benchmark_type}_{key}",
-            "stats": extract_stats(value),
-            "description": f"{benchmark_type} benchmark: {key}",
-        })
+        process_value(key, value, benchmark_type)
 
     return flattened
 
