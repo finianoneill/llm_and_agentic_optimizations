@@ -6,6 +6,11 @@ websockets>=12.0
 # Pydantic for data validation
 pydantic>=2.5.0
 
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+alembic>=1.13.0
+
 # LLM dependencies (from main project)
 anthropic>=0.40.0
 claude-agent-sdk>=0.1.0

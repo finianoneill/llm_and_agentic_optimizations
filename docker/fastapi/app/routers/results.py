@@ -1,136 +1,181 @@
-"""Results API endpoints for retrieving saved benchmark results."""
+"""Results API endpoints for retrieving benchmark results from database."""
 
-import json
+import csv
+import io
 from datetime import datetime
-from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 
 from app.models import ResultSummary, StatsSchema
+from app.db.session import get_db
+from app.db import crud
 
 router = APIRouter(prefix="/api/results", tags=["results"])
 
-RESULTS_DIR = Path("/app/results")
 
-
-def parse_result_file(filepath: Path) -> ResultSummary:
-    """Parse a result JSON file into a summary."""
-    try:
-        with open(filepath) as f:
-            data = json.load(f)
-
-        # Handle both single result and comparison formats
-        if "results" in data:
-            # Comparison format
-            first_result = data["results"][0] if data["results"] else {}
-            stats_data = first_result.get("stats", {})
-            benchmark_type = data.get("name", "comparison")
-            model = first_result.get("config", {}).get("model", "unknown")
-        else:
-            # Single result format
-            stats_data = data.get("stats", {})
-            benchmark_type = data.get("config", {}).get("name", "unknown")
-            model = data.get("config", {}).get("model", "unknown")
-
-        # Parse timestamp from filename or data
-        timestamp_str = data.get("timestamp") or filepath.stem.split("_")[-2:]
-        if isinstance(timestamp_str, list):
-            timestamp_str = "_".join(timestamp_str)
-        try:
-            created_at = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
-        except (ValueError, TypeError):
-            created_at = datetime.fromtimestamp(filepath.stat().st_mtime)
-
-        return ResultSummary(
-            filename=filepath.name,
-            benchmark_type=benchmark_type,
-            model=model,
-            created_at=created_at,
-            stats=StatsSchema(**stats_data) if stats_data else StatsSchema(),
-        )
-    except Exception as e:
-        # Return minimal summary on parse error
-        return ResultSummary(
-            filename=filepath.name,
-            benchmark_type="unknown",
-            model="unknown",
-            created_at=datetime.fromtimestamp(filepath.stat().st_mtime),
-            stats=StatsSchema(),
-        )
+def result_to_summary(result, job) -> ResultSummary:
+    """Convert database result to ResultSummary."""
+    stats_data = result.stats or {}
+    return ResultSummary(
+        job_id=job.id,
+        result_name=result.name,
+        benchmark_type=job.benchmark_type,
+        model=job.model,
+        created_at=result.created_at or job.created_at,
+        stats=StatsSchema(**stats_data) if stats_data else StatsSchema(),
+    )
 
 
 @router.get("", response_model=list[ResultSummary])
-async def list_results():
-    """List all saved result files."""
-    if not RESULTS_DIR.exists():
-        return []
+async def list_results(
+    benchmark_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """List all benchmark results."""
+    # Get completed jobs
+    jobs = crud.get_jobs(db, skip=skip, limit=limit, state="completed")
+
+    if benchmark_type:
+        jobs = [j for j in jobs if j.benchmark_type == benchmark_type]
 
     results = []
-    for filepath in RESULTS_DIR.glob("*.json"):
-        summary = parse_result_file(filepath)
-        results.append(summary)
+    for job in jobs:
+        job_results = crud.get_results_for_job(db, job.id)
+        for result in job_results:
+            results.append(result_to_summary(result, job))
 
     # Sort by created_at descending (newest first)
     results.sort(key=lambda x: x.created_at, reverse=True)
     return results
 
 
-@router.get("/{filename}")
-async def get_result(filename: str):
-    """Get a specific result file."""
-    filepath = RESULTS_DIR / filename
+@router.get("/{job_id}")
+async def get_result(job_id: str, db: Session = Depends(get_db)):
+    """Get results for a specific job."""
+    job = crud.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Result file not found")
+    results = crud.get_results_for_job(db, job_id)
+    if not results:
+        raise HTTPException(status_code=404, detail="No results found for this job")
 
-    if not filepath.suffix == ".json":
-        raise HTTPException(status_code=400, detail="Invalid file type")
+    return {
+        "job_id": job.id,
+        "benchmark_type": job.benchmark_type,
+        "model": job.model,
+        "config": {
+            "runs": job.runs,
+            "max_tokens": job.max_tokens,
+            "prompt": job.prompt,
+        },
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "results": [r.to_dict(include_model=job.model) for r in results],
+    }
 
-    # Ensure we're not escaping the results directory
-    try:
-        filepath.resolve().relative_to(RESULTS_DIR.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
 
-    with open(filepath) as f:
-        return json.load(f)
+@router.get("/{job_id}/export")
+async def export_result_csv(job_id: str, db: Session = Depends(get_db)):
+    """Export job results as CSV file."""
+    job = crud.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
+    # Get timing results for this job
+    timing_results = crud.get_timing_results_for_job(db, job_id)
 
-@router.get("/{filename}/download")
-async def download_result(filename: str):
-    """Download a result file."""
-    filepath = RESULTS_DIR / filename
+    # Create CSV in memory
+    output = io.StringIO()
+    writer = csv.writer(output)
 
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Result file not found")
+    # Write header
+    writer.writerow([
+        "job_id",
+        "benchmark_type",
+        "model",
+        "run_name",
+        "total_latency_ms",
+        "ttft_ms",
+        "input_tokens",
+        "output_tokens",
+        "tokens_per_second",
+        "cache_hit",
+        "cache_hit_rate",
+        "timestamp",
+    ])
 
-    # Ensure we're not escaping the results directory
-    try:
-        filepath.resolve().relative_to(RESULTS_DIR.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Write timing results
+    for tr in timing_results:
+        writer.writerow([
+            job.id,
+            job.benchmark_type,
+            job.model,
+            tr.name,
+            tr.total_latency_ms,
+            tr.ttft_ms if tr.ttft_ms else "",
+            tr.input_tokens,
+            tr.output_tokens,
+            tr.tokens_per_second,
+            tr.cache_hit,
+            tr.cache_hit_rate,
+            tr.created_at.isoformat() if tr.created_at else "",
+        ])
 
-    return FileResponse(
-        path=filepath,
-        filename=filename,
-        media_type="application/json",
+    # If no timing results, write aggregated stats from benchmark results
+    if not timing_results:
+        results = crud.get_results_for_job(db, job_id)
+        for result in results:
+            stats = result.stats or {}
+            writer.writerow([
+                job.id,
+                job.benchmark_type,
+                job.model,
+                result.name,
+                stats.get("latency_mean_ms", ""),
+                stats.get("ttft_p50_ms", ""),
+                "",  # input_tokens
+                "",  # output_tokens
+                stats.get("avg_tokens_per_second", ""),
+                "",  # cache_hit
+                stats.get("avg_cache_hit_rate", ""),
+                result.created_at.isoformat() if result.created_at else "",
+            ])
+
+    output.seek(0)
+
+    # Generate filename
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"{job.benchmark_type}_{job_id}_{timestamp}.csv"
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
-@router.delete("/{filename}")
-async def delete_result(filename: str):
-    """Delete a result file."""
-    filepath = RESULTS_DIR / filename
+@router.delete("/{job_id}")
+async def delete_result(job_id: str, db: Session = Depends(get_db)):
+    """Delete a job and all its results."""
+    job = crud.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Result file not found")
+    # Don't allow deleting running jobs
+    if job.state == "running":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete a running job. Cancel it first.",
+        )
 
-    # Ensure we're not escaping the results directory
-    try:
-        filepath.resolve().relative_to(RESULTS_DIR.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
+    deleted = crud.delete_job(db, job_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete job")
 
-    filepath.unlink()
-    return {"message": f"Result file '{filename}' deleted"}
+    return {"message": f"Job '{job_id}' and all results deleted"}

@@ -1,16 +1,16 @@
 """Benchmark API endpoints with job management.
 
 All benchmark runs are traced to Langfuse when configured.
+Jobs are persisted to PostgreSQL database.
 """
 
 import asyncio
-import json
 import uuid
 from datetime import datetime
-from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from sqlalchemy.orm import Session
 
 from app.models import (
     BenchmarkType,
@@ -22,6 +22,8 @@ from app.models import (
     BenchmarkInfo,
     ProgressUpdate,
 )
+from app.db.session import get_db
+from app.db import crud
 
 # Import Langfuse tracing utilities
 try:
@@ -35,49 +37,13 @@ except ImportError:
     get_langfuse_tracer = lambda: None
     flush_langfuse = lambda: None
 
-RESULTS_DIR = Path("/app/results")
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 router = APIRouter(prefix="/api", tags=["benchmarks"])
 
 
-def save_result_to_file(job: JobStatus) -> str:
-    """Save job results to a JSON file. Returns the filename."""
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"{job.benchmark_type.value}_{timestamp}_{job.job_id}.json"
-    filepath = RESULTS_DIR / filename
-
-    result_data = {
-        "job_id": job.job_id,
-        "benchmark_type": job.benchmark_type.value,
-        "timestamp": timestamp,
-        "config": {
-            "model": job.request.model,
-            "runs": job.request.runs,
-            "max_tokens": job.request.max_tokens,
-            "prompt": job.request.prompt,
-        },
-        "results": job.results,
-        "started_at": job.started_at.isoformat() if job.started_at else None,
-        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-    }
-
-    # Extract stats from results if available
-    if job.results and isinstance(job.results, list) and len(job.results) > 0:
-        first_result = job.results[0]
-        if isinstance(first_result, dict) and "stats" in first_result:
-            result_data["stats"] = first_result["stats"]
-
-    with open(filepath, "w") as f:
-        json.dump(result_data, f, indent=2, default=str)
-
-    return filename
-
-# In-memory job store
-jobs: dict[str, JobStatus] = {}
-
-# WebSocket connections per job
-websocket_connections: dict[str, list[WebSocket]] = {}
+# In-memory store for active jobs (needed for WebSocket real-time updates)
+# Jobs are persisted to database on completion
+active_jobs: dict[str, JobStatus] = {}
 
 
 class WebSocketManager:
@@ -164,41 +130,223 @@ BENCHMARK_INFO = {
 }
 
 
-def create_progress_callback(job_id: str) -> Callable:
-    """Create a progress callback that updates job status and broadcasts to WebSockets."""
+def job_to_status(job, results=None) -> JobStatus:
+    """Convert database job to JobStatus Pydantic model."""
+    return JobStatus(
+        job_id=job.id,
+        benchmark_type=BenchmarkType(job.benchmark_type),
+        state=JobState(job.state),
+        request=BenchmarkRequest(
+            model=job.model,
+            runs=job.runs,
+            max_tokens=job.max_tokens,
+            prompt=job.prompt,
+            quick=job.quick,
+        ),
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        progress=ProgressUpdate(
+            job_id=job.id,
+            state=JobState(job.state),
+            message="Job completed" if job.state == "completed" else job.error or "",
+        ),
+        results=[r.to_dict(include_model=job.model) for r in results] if results else None,
+        error=job.error,
+    )
 
-    async def callback(
-        current_run: int,
-        total_runs: int,
-        benchmark_name: str,
-        message: str = "",
-        metrics: dict = None,
-    ):
-        if job_id in jobs:
-            job = jobs[job_id]
-            job.progress = ProgressUpdate(
+
+def save_results_to_db(job_id: str, results: list, db: Session):
+    """Save benchmark results to database."""
+    for result in results:
+        if isinstance(result, dict):
+            name = result.get("name", "unknown")
+            stats = result.get("stats", {})
+
+            # Convert stats object to dict if needed
+            if hasattr(stats, "__dict__"):
+                stats = vars(stats)
+            elif hasattr(stats, "model_dump"):
+                stats = stats.model_dump()
+
+            crud.save_benchmark_result(
+                db=db,
                 job_id=job_id,
-                state=JobState.RUNNING,
-                current_run=current_run,
-                total_runs=total_runs,
-                current_benchmark=benchmark_name,
-                message=message,
-                metrics=metrics or {},
+                name=name,
+                stats=stats,
+                description=result.get("description", ""),
+                success_rate=result.get("success_rate", 1.0),
+                errors=result.get("errors", []),
             )
-            await ws_manager.broadcast(job_id, job.progress.model_dump(mode="json"))
 
-    return callback
+
+def flatten_benchmark_results(results: dict, benchmark_type: str) -> list[dict]:
+    """Transform nested benchmark results into a flat list for database storage.
+
+    Handles various result structures from different benchmarks:
+    - BenchmarkResult objects: Extract .stats attribute (matches StatsSchema)
+    - Lists of TimingResult: Aggregate into stats format
+    - Nested dicts: Recursively flatten with prefixed names
+    - Plain dicts: Store as-is for custom metrics
+
+    Returns list of {"name": "...", "stats": {...}, "description": "..."} dicts.
+    """
+    flattened = []
+
+    def aggregate_timing_results(timing_list: list) -> dict:
+        """Aggregate a list of TimingResult objects into stats format."""
+        if not timing_list:
+            return {}
+
+        latencies = []
+        ttfts = []
+        tokens_per_sec = []
+        cache_hits = []
+
+        for tr in timing_list:
+            # Handle both TimingResult objects and dicts
+            if hasattr(tr, "total_latency_ms"):
+                latencies.append(tr.total_latency_ms)
+                if tr.ttft_ms is not None:
+                    ttfts.append(tr.ttft_ms)
+                tokens_per_sec.append(tr.tokens_per_second)
+                cache_hits.append(tr.cache_hit_rate if hasattr(tr, "cache_hit_rate") else 0)
+            elif isinstance(tr, dict):
+                if "total_latency_ms" in tr:
+                    latencies.append(tr["total_latency_ms"])
+                if tr.get("ttft_ms") is not None:
+                    ttfts.append(tr["ttft_ms"])
+                if "tokens_per_second" in tr:
+                    tokens_per_sec.append(tr["tokens_per_second"])
+
+        def percentile(values: list, p: float) -> float:
+            if not values:
+                return 0.0
+            sorted_vals = sorted(values)
+            k = (len(sorted_vals) - 1) * (p / 100)
+            f = int(k)
+            c = min(f + 1, len(sorted_vals) - 1)
+            return sorted_vals[f] + (k - f) * (sorted_vals[c] - sorted_vals[f])
+
+        return {
+            "count": len(timing_list),
+            "latency_p50_ms": percentile(latencies, 50),
+            "latency_p95_ms": percentile(latencies, 95),
+            "latency_p99_ms": percentile(latencies, 99),
+            "latency_mean_ms": sum(latencies) / len(latencies) if latencies else 0,
+            "latency_min_ms": min(latencies) if latencies else 0,
+            "latency_max_ms": max(latencies) if latencies else 0,
+            "ttft_p50_ms": percentile(ttfts, 50) if ttfts else None,
+            "ttft_p95_ms": percentile(ttfts, 95) if ttfts else None,
+            "ttft_p99_ms": percentile(ttfts, 99) if ttfts else None,
+            "avg_tokens_per_second": sum(tokens_per_sec) / len(tokens_per_sec) if tokens_per_sec else 0,
+            "avg_cache_hit_rate": sum(cache_hits) / len(cache_hits) if cache_hits else 0,
+        }
+
+    def is_benchmark_result(obj) -> bool:
+        """Check if object is a BenchmarkResult (has stats dict attribute)."""
+        return hasattr(obj, "stats") and isinstance(getattr(obj, "stats"), dict)
+
+    def is_timing_result_list(obj) -> bool:
+        """Check if object is a list of TimingResult objects."""
+        if not isinstance(obj, list) or not obj:
+            return False
+        first = obj[0]
+        return hasattr(first, "total_latency_ms") or (
+            isinstance(first, dict) and "total_latency_ms" in first
+        )
+
+    def process_value(key: str, value: Any, prefix: str) -> None:
+        """Recursively process a value and add results to flattened list."""
+        full_name = f"{prefix}_{key}" if prefix else key
+
+        # Case 1: BenchmarkResult object - extract its stats
+        if is_benchmark_result(value):
+            flattened.append({
+                "name": full_name,
+                "stats": value.stats,  # Already in correct format
+                "description": f"{benchmark_type} benchmark: {key}",
+            })
+
+        # Case 2: List of TimingResult objects - aggregate into stats
+        elif is_timing_result_list(value):
+            flattened.append({
+                "name": full_name,
+                "stats": aggregate_timing_results(value),
+                "description": f"{benchmark_type} benchmark: {key}",
+            })
+
+        # Case 3: Nested dict that might contain BenchmarkResults
+        elif isinstance(value, dict):
+            # Check if any values are BenchmarkResult or TimingResult lists
+            has_complex_values = any(
+                is_benchmark_result(v) or is_timing_result_list(v)
+                for v in value.values()
+            )
+
+            if has_complex_values:
+                # Recurse into nested structure
+                for k, v in value.items():
+                    process_value(k, v, full_name)
+            else:
+                # Plain dict with metrics - store as-is
+                flattened.append({
+                    "name": full_name,
+                    "stats": value,
+                    "description": f"{benchmark_type} benchmark: {key}",
+                })
+
+        # Case 4: List of dicts (like timing_results from to_dict)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            # Check if these look like timing results
+            if "total_latency_ms" in value[0]:
+                flattened.append({
+                    "name": full_name,
+                    "stats": aggregate_timing_results(value),
+                    "description": f"{benchmark_type} benchmark: {key}",
+                })
+            else:
+                # Store as summary
+                flattened.append({
+                    "name": full_name,
+                    "stats": {"count": len(value), "items": value},
+                    "description": f"{benchmark_type} benchmark: {key}",
+                })
+
+        # Case 5: Other values - wrap in stats dict
+        else:
+            flattened.append({
+                "name": full_name,
+                "stats": {"value": value} if not isinstance(value, dict) else value,
+                "description": f"{benchmark_type} benchmark: {key}",
+            })
+
+    # Process each top-level key
+    for key, value in results.items():
+        process_value(key, value, benchmark_type)
+
+    return flattened
 
 
 async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request: BenchmarkRequest):
     """Background task to run a benchmark.
 
     Individual LLM calls are traced to Langfuse automatically.
+    Results are saved to PostgreSQL on completion.
     """
-    job = jobs[job_id]
+    from app.db.session import SessionLocal
+
+    job = active_jobs[job_id]
     job.state = JobState.RUNNING
     job.started_at = datetime.utcnow()
     job.progress.state = JobState.RUNNING
+
+    # Update database
+    db = SessionLocal()
+    try:
+        crud.update_job_state(db, job_id, "running", started_at=job.started_at)
+    finally:
+        db.close()
 
     # Initialize Langfuse tracer (ensures env vars are set for individual traces)
     if LANGFUSE_AVAILABLE:
@@ -225,32 +373,32 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
 
             suite = CachingBenchmarkSuite(model=request.model)
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "caching")
 
         elif benchmark_type == BenchmarkType.PARALLEL:
             from benchmarks.parallelism import ParallelismBenchmarkSuite
 
             suite = ParallelismBenchmarkSuite(model=request.model)
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "parallelism")
 
         elif benchmark_type == BenchmarkType.ROUTING:
             from benchmarks.model_routing import RoutingBenchmarkSuite
 
             suite = RoutingBenchmarkSuite()
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "routing")
 
         elif benchmark_type == BenchmarkType.TOPOLOGY:
             from benchmarks.agent_topology import AgentTopologyBenchmarkSuite
 
             suite = AgentTopologyBenchmarkSuite(model=request.model)
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "topology")
 
         elif benchmark_type == BenchmarkType.ALL:
             # Run all benchmarks sequentially
-            all_results = {}
+            all_results = []
 
             for btype in [
                 BenchmarkType.STREAMING,
@@ -263,10 +411,39 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
                 job.progress.message = f"Running {btype.value} benchmark..."
                 await ws_manager.broadcast(job_id, job.progress.model_dump(mode="json"))
 
-                # Recursively run each benchmark type
-                sub_request = request.model_copy()
-                await run_benchmark_task(f"{job_id}_{btype.value}", btype, sub_request)
-                all_results[btype.value] = jobs.get(f"{job_id}_{btype.value}", {})
+                # Run each benchmark
+                if btype == BenchmarkType.STREAMING:
+                    from benchmarks.streaming import compare_streaming_vs_non_streaming
+                    results = await compare_streaming_vs_non_streaming(
+                        prompt=request.prompt or "Explain quantum computing in 3 paragraphs.",
+                        model=request.model,
+                        max_tokens=request.max_tokens,
+                        num_runs=request.runs,
+                    )
+                    all_results.extend([
+                        {"name": "streaming", "stats": results["streaming"].stats},
+                        {"name": "non_streaming", "stats": results["non_streaming"].stats},
+                    ])
+                elif btype == BenchmarkType.CACHING:
+                    from benchmarks.caching import CachingBenchmarkSuite
+                    suite = CachingBenchmarkSuite(model=request.model)
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "caching"))
+                elif btype == BenchmarkType.PARALLEL:
+                    from benchmarks.parallelism import ParallelismBenchmarkSuite
+                    suite = ParallelismBenchmarkSuite(model=request.model)
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "parallelism"))
+                elif btype == BenchmarkType.ROUTING:
+                    from benchmarks.model_routing import RoutingBenchmarkSuite
+                    suite = RoutingBenchmarkSuite()
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "routing"))
+                elif btype == BenchmarkType.TOPOLOGY:
+                    from benchmarks.agent_topology import AgentTopologyBenchmarkSuite
+                    suite = AgentTopologyBenchmarkSuite(model=request.model)
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "topology"))
 
             job.results = all_results
 
@@ -275,13 +452,20 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
         job.progress.state = JobState.COMPLETED
         job.progress.message = "Benchmark completed successfully"
 
-        # Save results to file for persistence
+        # Save results to database
+        db = SessionLocal()
         try:
-            filename = save_result_to_file(job)
-            job.result_file = filename
-            job.progress.message = f"Benchmark completed. Results saved to {filename}"
+            crud.update_job_state(
+                db, job_id, "completed",
+                completed_at=job.completed_at,
+            )
+            if job.results:
+                save_results_to_db(job_id, job.results, db)
+            job.progress.message = "Benchmark completed. Results saved to database."
         except Exception as save_error:
             job.progress.message = f"Benchmark completed but failed to save: {save_error}"
+        finally:
+            db.close()
 
     except Exception as e:
         job.state = JobState.FAILED
@@ -290,6 +474,17 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
         job.progress.state = JobState.FAILED
         job.progress.message = f"Benchmark failed: {e}"
 
+        # Update database with error
+        db = SessionLocal()
+        try:
+            crud.update_job_state(
+                db, job_id, "failed",
+                completed_at=job.completed_at,
+                error=str(e),
+            )
+        finally:
+            db.close()
+
     finally:
         # Flush Langfuse traces
         if LANGFUSE_AVAILABLE:
@@ -297,6 +492,11 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
 
     # Broadcast final status
     await ws_manager.broadcast(job_id, job.progress.model_dump(mode="json"))
+
+    # Remove from active jobs after a delay (keep for WebSocket reconnection)
+    await asyncio.sleep(60)
+    if job_id in active_jobs:
+        del active_jobs[job_id]
 
 
 @router.get("/benchmarks", response_model=list[BenchmarkInfo])
@@ -314,7 +514,11 @@ async def get_benchmark_info(benchmark_type: BenchmarkType):
 
 
 @router.post("/benchmarks/{benchmark_type}/run", response_model=JobResponse)
-async def run_benchmark(benchmark_type: BenchmarkType, request: BenchmarkRequest = None):
+async def run_benchmark(
+    benchmark_type: BenchmarkType,
+    request: BenchmarkRequest = None,
+    db: Session = Depends(get_db),
+):
     """Start a benchmark run. Returns immediately with a job ID."""
     if request is None:
         request = BenchmarkRequest()
@@ -325,6 +529,19 @@ async def run_benchmark(benchmark_type: BenchmarkType, request: BenchmarkRequest
     job_id = str(uuid.uuid4())[:8]
     now = datetime.utcnow()
 
+    # Create job in database
+    crud.create_job(
+        db=db,
+        job_id=job_id,
+        benchmark_type=benchmark_type.value,
+        model=request.model,
+        runs=request.runs,
+        max_tokens=request.max_tokens,
+        prompt=request.prompt,
+        quick=request.quick,
+    )
+
+    # Create in-memory job for WebSocket updates
     job = JobStatus(
         job_id=job_id,
         benchmark_type=benchmark_type,
@@ -337,7 +554,7 @@ async def run_benchmark(benchmark_type: BenchmarkType, request: BenchmarkRequest
             message="Job created, waiting to start...",
         ),
     )
-    jobs[job_id] = job
+    active_jobs[job_id] = job
 
     # Start background task
     asyncio.create_task(run_benchmark_task(job_id, benchmark_type, request))
@@ -350,35 +567,73 @@ async def run_benchmark(benchmark_type: BenchmarkType, request: BenchmarkRequest
 
 
 @router.get("/jobs", response_model=JobListResponse)
-async def list_jobs():
+async def list_jobs(db: Session = Depends(get_db)):
     """List all jobs (running and completed)."""
+    # Get jobs from database
+    db_jobs = crud.get_jobs(db)
+    total = crud.get_job_count(db)
+
+    # Merge with active jobs (which have real-time status)
+    jobs_list = []
+    for db_job in db_jobs:
+        if db_job.id in active_jobs:
+            # Use active job for real-time status
+            jobs_list.append(active_jobs[db_job.id])
+        else:
+            # Use database job
+            results = crud.get_results_for_job(db, db_job.id)
+            jobs_list.append(job_to_status(db_job, results))
+
     return JobListResponse(
-        jobs=list(jobs.values()),
-        total=len(jobs),
+        jobs=jobs_list,
+        total=total,
     )
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus)
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, db: Session = Depends(get_db)):
     """Get the status of a specific job."""
-    if job_id not in jobs:
+    # Check active jobs first (for real-time status)
+    if job_id in active_jobs:
+        return active_jobs[job_id]
+
+    # Check database
+    db_job = crud.get_job(db, job_id)
+    if not db_job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return jobs[job_id]
+
+    results = crud.get_results_for_job(db, job_id)
+    return job_to_status(db_job, results)
 
 
 @router.delete("/jobs/{job_id}")
-async def cancel_job(job_id: str):
+async def cancel_job(job_id: str, db: Session = Depends(get_db)):
     """Cancel a running job."""
-    if job_id not in jobs:
+    # Check active jobs
+    if job_id in active_jobs:
+        job = active_jobs[job_id]
+        if job.state == JobState.RUNNING:
+            job.state = JobState.CANCELLED
+            job.completed_at = datetime.utcnow()
+            job.progress.state = JobState.CANCELLED
+            job.progress.message = "Job cancelled by user"
+
+            # Update database
+            crud.update_job_state(
+                db, job_id, "cancelled",
+                completed_at=job.completed_at,
+            )
+
+            await ws_manager.broadcast(job_id, job.progress.model_dump(mode="json"))
+        return {"message": "Job cancelled"}
+
+    # Check database
+    db_job = crud.get_job(db, job_id)
+    if not db_job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    job = jobs[job_id]
-    if job.state == JobState.RUNNING:
-        job.state = JobState.CANCELLED
-        job.completed_at = datetime.utcnow()
-        job.progress.state = JobState.CANCELLED
-        job.progress.message = "Job cancelled by user"
-        await ws_manager.broadcast(job_id, job.progress.model_dump(mode="json"))
+    if db_job.state == "running":
+        crud.update_job_state(db, job_id, "cancelled", completed_at=datetime.utcnow())
 
     return {"message": "Job cancelled"}
 
@@ -386,16 +641,39 @@ async def cancel_job(job_id: str):
 @router.websocket("/ws/{job_id}")
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
     """WebSocket endpoint for real-time job progress updates."""
-    if job_id not in jobs:
-        await websocket.close(code=4004, reason="Job not found")
-        return
+    # Check if job exists (active or in database)
+    from app.db.session import SessionLocal
+
+    if job_id not in active_jobs:
+        db = SessionLocal()
+        try:
+            db_job = crud.get_job(db, job_id)
+            if not db_job:
+                await websocket.close(code=4004, reason="Job not found")
+                return
+        finally:
+            db.close()
 
     await ws_manager.connect(job_id, websocket)
 
     try:
         # Send current status immediately
-        job = jobs[job_id]
-        await websocket.send_json(job.progress.model_dump(mode="json"))
+        if job_id in active_jobs:
+            job = active_jobs[job_id]
+            await websocket.send_json(job.progress.model_dump(mode="json"))
+        else:
+            # Job completed, send final status
+            db = SessionLocal()
+            try:
+                db_job = crud.get_job(db, job_id)
+                if db_job:
+                    await websocket.send_json({
+                        "job_id": job_id,
+                        "state": db_job.state,
+                        "message": "Job completed" if db_job.state == "completed" else db_job.error or "",
+                    })
+            finally:
+                db.close()
 
         # Keep connection alive and wait for messages
         while True:
