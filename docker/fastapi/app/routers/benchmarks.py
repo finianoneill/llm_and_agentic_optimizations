@@ -180,6 +180,41 @@ def save_results_to_db(job_id: str, results: list, db: Session):
             )
 
 
+def flatten_benchmark_results(results: dict, benchmark_type: str) -> list[dict]:
+    """Transform nested benchmark results into a flat list for database storage.
+
+    Non-streaming benchmarks return nested dicts like:
+        {"warmup": [...], "comparison": {...}}
+
+    This function flattens them into:
+        [{"name": "caching_warmup", "stats": {...}}, {"name": "caching_comparison", "stats": {...}}]
+    """
+    flattened = []
+
+    def extract_stats(value) -> dict:
+        """Extract stats dict from various result types."""
+        if isinstance(value, dict):
+            return value
+        elif hasattr(value, "model_dump"):
+            return value.model_dump()
+        elif hasattr(value, "__dict__"):
+            return vars(value)
+        elif isinstance(value, list):
+            # For lists of results, summarize them
+            return {"results": [extract_stats(v) for v in value]}
+        else:
+            return {"value": value}
+
+    for key, value in results.items():
+        flattened.append({
+            "name": f"{benchmark_type}_{key}",
+            "stats": extract_stats(value),
+            "description": f"{benchmark_type} benchmark: {key}",
+        })
+
+    return flattened
+
+
 async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request: BenchmarkRequest):
     """Background task to run a benchmark.
 
@@ -225,28 +260,28 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
 
             suite = CachingBenchmarkSuite(model=request.model)
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "caching")
 
         elif benchmark_type == BenchmarkType.PARALLEL:
             from benchmarks.parallelism import ParallelismBenchmarkSuite
 
             suite = ParallelismBenchmarkSuite(model=request.model)
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "parallelism")
 
         elif benchmark_type == BenchmarkType.ROUTING:
             from benchmarks.model_routing import RoutingBenchmarkSuite
 
             suite = RoutingBenchmarkSuite()
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "routing")
 
         elif benchmark_type == BenchmarkType.TOPOLOGY:
             from benchmarks.agent_topology import AgentTopologyBenchmarkSuite
 
             suite = AgentTopologyBenchmarkSuite(model=request.model)
             results = await suite.run_all(num_runs=request.runs)
-            job.results = results
+            job.results = flatten_benchmark_results(results, "topology")
 
         elif benchmark_type == BenchmarkType.ALL:
             # Run all benchmarks sequentially
@@ -279,19 +314,23 @@ async def run_benchmark_task(job_id: str, benchmark_type: BenchmarkType, request
                 elif btype == BenchmarkType.CACHING:
                     from benchmarks.caching import CachingBenchmarkSuite
                     suite = CachingBenchmarkSuite(model=request.model)
-                    all_results.extend(await suite.run_all(num_runs=request.runs))
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "caching"))
                 elif btype == BenchmarkType.PARALLEL:
                     from benchmarks.parallelism import ParallelismBenchmarkSuite
                     suite = ParallelismBenchmarkSuite(model=request.model)
-                    all_results.extend(await suite.run_all(num_runs=request.runs))
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "parallelism"))
                 elif btype == BenchmarkType.ROUTING:
                     from benchmarks.model_routing import RoutingBenchmarkSuite
                     suite = RoutingBenchmarkSuite()
-                    all_results.extend(await suite.run_all(num_runs=request.runs))
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "routing"))
                 elif btype == BenchmarkType.TOPOLOGY:
                     from benchmarks.agent_topology import AgentTopologyBenchmarkSuite
                     suite = AgentTopologyBenchmarkSuite(model=request.model)
-                    all_results.extend(await suite.run_all(num_runs=request.runs))
+                    results = await suite.run_all(num_runs=request.runs)
+                    all_results.extend(flatten_benchmark_results(results, "topology"))
 
             job.results = all_results
 
