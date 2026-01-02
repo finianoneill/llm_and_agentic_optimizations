@@ -165,7 +165,7 @@ elif page == "📊 View Results":
                 for r in results
             ])
 
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
             # Result details - get unique job IDs
             st.subheader("Result Details")
@@ -206,7 +206,7 @@ elif page == "📊 View Results":
                                     y="Latency (ms)",
                                     title="Latency Distribution",
                                 )
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, width="stretch")
 
                     # Download buttons
                     col1, col2 = st.columns(2)
@@ -218,9 +218,23 @@ elif page == "📊 View Results":
                             mime="application/json",
                         )
                     with col2:
-                        # CSV export link
-                        csv_url = f"{API_BASE_URL}/api/results/{selected_job_id}/export"
-                        st.markdown(f"[📥 Download CSV]({csv_url})")
+                        # Fetch CSV from API and provide download
+                        try:
+                            csv_response = requests.get(
+                                f"{API_BASE_URL}/api/results/{selected_job_id}/export",
+                                timeout=10
+                            )
+                            if csv_response.status_code == 200:
+                                st.download_button(
+                                    "📥 Download CSV",
+                                    data=csv_response.text,
+                                    file_name=f"{result_data.get('benchmark_type', 'result')}_{selected_job_id}.csv",
+                                    mime="text/csv",
+                                )
+                            else:
+                                st.warning("CSV export not available")
+                        except requests.RequestException:
+                            st.warning("Could not fetch CSV")
     else:
         st.error("Could not fetch results from API.")
 

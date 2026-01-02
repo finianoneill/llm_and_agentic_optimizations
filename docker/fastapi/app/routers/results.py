@@ -76,7 +76,7 @@ async def get_result(job_id: str, db: Session = Depends(get_db)):
         },
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-        "results": [r.to_dict() for r in results],
+        "results": [r.to_dict(include_model=job.model) for r in results],
     }
 
 

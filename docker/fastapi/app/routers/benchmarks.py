@@ -151,7 +151,7 @@ def job_to_status(job, results=None) -> JobStatus:
             state=JobState(job.state),
             message="Job completed" if job.state == "completed" else job.error or "",
         ),
-        results=[r.to_dict() for r in results] if results else None,
+        results=[r.to_dict(include_model=job.model) for r in results] if results else None,
         error=job.error,
     )
 

@@ -61,7 +61,7 @@ class Job(Base):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
-            "results": [r.to_dict() for r in self.results] if self.results else None,
+            "results": [r.to_dict(include_model=self.model) for r in self.results] if self.results else None,
         }
 
 
@@ -89,12 +89,12 @@ class BenchmarkResult(Base):
         cascade="all, delete-orphan",
     )
 
-    def to_dict(self) -> dict:
+    def to_dict(self, include_model: str = None) -> dict:
         """Convert to dictionary for API responses."""
         return {
             "name": self.name,
             "description": self.description,
-            "model": self.job.model if self.job else None,
+            "model": include_model,
             "stats": self.stats,
             "success_rate": self.success_rate,
             "start_time": self.start_time.isoformat() if self.start_time else None,

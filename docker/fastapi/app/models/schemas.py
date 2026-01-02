@@ -105,12 +105,12 @@ class BenchmarkResultSchema(BaseModel):
 
     name: str
     description: str = ""
-    model: str
+    model: Optional[str] = None
     timing_results: list[TimingResultSchema] = Field(default_factory=list)
-    stats: StatsSchema = Field(default_factory=StatsSchema)
+    stats: Optional[StatsSchema] = Field(default_factory=StatsSchema)
     success_rate: float = 1.0
-    start_time: datetime
-    end_time: datetime
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
     errors: list[str] = Field(default_factory=list)
 
 
